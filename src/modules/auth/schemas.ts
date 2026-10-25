@@ -1,0 +1,119 @@
+import { z } from 'zod';
+
+export const roleSchema = z.enum(['OWNER', 'MANAGER', 'STAFF']);
+
+export const otpRequestSchema = z.object({
+  email: z.string().email().trim().toLowerCase(),
+  role: roleSchema.optional().default('STAFF'),
+});
+
+export const otpVerifySchema = z.object({
+  email: z.string().email().trim().toLowerCase(),
+  code: z.string().trim().regex(/^\d{6}$/, 'OTP must be 6 digits'),
+  role: roleSchema.optional().default('STAFF'),
+  fullName: z.string().trim().min(2).optional(),
+  organizationName: z.string().trim().min(2).optional(),
+  timezone: z.string().optional(),
+  currency: z.string().optional(),
+  premisesName: z.string().optional(),
+  radiusMeters: z.number().optional(),
+  deviceName: z.string().optional(),
+  deviceType: z.string().optional(),
+  osName: z.string().optional(),
+});
+
+export const googleExchangeSchema = z.object({
+  code: z.string().min(1),
+  redirectUri: z.string().url().nullable().optional(),
+  deviceName: z.string().optional(),
+  deviceType: z.string().optional(),
+  osName: z.string().optional(),
+});
+
+export const googleOwnerRegistrationSchema = z.object({
+  idToken: z.string().min(1),
+  organizationName: z.string().trim().min(2),
+  timezone: z.string().optional(),
+  currency: z.string().optional(),
+  premisesName: z.string().trim().min(2),
+  radiusMeters: z.number().int().min(1).max(10000).optional(),
+  deviceName: z.string().optional(),
+  deviceType: z.string().optional(),
+  osName: z.string().optional(),
+});
+
+export const refreshTokenSchema = z.object({
+  refreshToken: z.string().min(10),
+  deviceName: z.string().optional(),
+  deviceType: z.string().optional(),
+  osName: z.string().optional(),
+});
+
+export const updateProfileSchema = z.object({
+  fullName: z.string().trim().min(2).max(100).optional(),
+  phone: z.string().trim().nullable().optional(),
+  avatar: z.string().optional(),
+  avatarUrl: z.string().nullable().optional(),
+});
+
+export const authUserSchema = z.object({
+  id: z.string(),
+  email: z.string(),
+  fullName: z.string(),
+  role: roleSchema,
+  organizationId: z.string(),
+  organizationName: z.string(),
+  avatarUrl: z.string().nullable().optional(),
+  organizationLogoUrl: z.string().nullable().optional(),
+});
+
+export const otpResponseSchema = z.object({
+  sent: z.boolean(),
+  email: z.string(),
+  expiresInSeconds: z.number(),
+  devOtp: z.string().optional(),
+});
+
+export const authResponseSchema = z.object({
+  accessToken: z.string(),
+  expiresIn: z.number(),
+  refreshToken: z.string(),
+  user: authUserSchema,
+});
+
+export const logoutResponseSchema = z.object({
+  loggedOut: z.boolean(),
+  revokedSessions: z.number().optional(),
+});
+
+export const loggedDeviceSchema = z.object({
+  id: z.string(),
+  userId: z.string(),
+  sessionJti: z.string(),
+  deviceName: z.string().nullable().optional(),
+  deviceType: z.string().nullable().optional(),
+  osName: z.string().nullable().optional(),
+  ipAddress: z.string().nullable().optional(),
+  userAgent: z.string().nullable().optional(),
+  isActive: z.boolean(),
+  isCurrentDevice: z.boolean().optional(),
+  lastActiveAt: z.string(),
+  createdAt: z.string(),
+  revokedAt: z.string().nullable().optional(),
+});
+
+export const loggedDevicesResponseSchema = z.object({
+  devices: z.array(loggedDeviceSchema),
+});
+
+export type OtpRequestInput = z.infer<typeof otpRequestSchema>;
+export type OtpVerifyInput = z.infer<typeof otpVerifySchema>;
+export type GoogleExchangeInput = z.infer<typeof googleExchangeSchema>;
+export type GoogleOwnerRegistrationInput = z.infer<typeof googleOwnerRegistrationSchema>;
+export type RefreshTokenInput = z.infer<typeof refreshTokenSchema>;
+export type OtpResponse = z.infer<typeof otpResponseSchema>;
+export type AuthResponse = z.infer<typeof authResponseSchema>;
+export type AuthUser = z.infer<typeof authUserSchema>;
+export type LogoutResponse = z.infer<typeof logoutResponseSchema>;
+export type LoggedDevice = z.infer<typeof loggedDeviceSchema>;
+export type LoggedDevicesResponse = z.infer<typeof loggedDevicesResponseSchema>;

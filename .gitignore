@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+*.log
+.env
+.env.local
+.env.*.local
+
+# Database cleanup and seed scripts (local only, not uploaded to git)
+scripts/clean-db.ts
+scripts/clean-db.js
+clean-db.ts
+clean-db.js
