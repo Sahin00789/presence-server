@@ -8,10 +8,9 @@ import {
 } from '../../shared/services/staff.service.js';
 import { buildAttendanceSummary, listAttendanceRecords } from '../attendance/service.js';
 import { buildSchedule, resolveTimezone } from '../shifts/service.js';
-import { getWalletSummary } from '../wallet/service.js';
 import { listMonthlyPayrollSummaries } from '../payroll/service.js';
 import { listAuditLogs } from '../audit/service.js';
-import { toDateISO } from '../../shared/utils/datetime.js';
+import { toDateISOInTimeZone } from '../../shared/utils/datetime.js';
 import { formatMinorUnits } from '../../shared/utils/money.js';
 import { buildPdfReport } from '../../shared/utils/pdf.js';
 
@@ -81,7 +80,8 @@ export async function getDashboardSummary(
   user: { userId: string; role: 'OWNER' | 'MANAGER' | 'STAFF' },
   organizationId: string
 ) {
-  const today = toDateISO(new Date());
+  const timezone = await resolveTimezone(fastify, organizationId);
+  const today = toDateISOInTimeZone(new Date(), timezone);
   const monthStart = `${today.slice(0, 7)}-01`;
   const generatedAt = new Date().toISOString();
 
@@ -93,17 +93,16 @@ export async function getDashboardSummary(
 
     const [todayEvent] = await fastify.db
       .select()
-      .from(schema.attendanceEvents)
+      .from(schema.employeeAttendance)
       .where(
         and(
-          eq(schema.attendanceEvents.staffProfileId, profile.id),
-          eq(schema.attendanceEvents.workDate, today)
+          eq(schema.employeeAttendance.employeeId, profile.id),
+          eq(schema.employeeAttendance.workDate, today)
         )
       )
-      .orderBy(desc(schema.attendanceEvents.createdAt))
+      .orderBy(desc(schema.employeeAttendance.createdAt))
       .limit(1);
 
-    const timezone = await resolveTimezone(fastify, organizationId);
     const [shift] = await buildSchedule(
       fastify,
       organizationId,
@@ -120,7 +119,6 @@ export async function getDashboardSummary(
       monthStart,
       today
     );
-    const wallet = await getWalletSummary(fastify, user.userId, organizationId);
 
     return {
       role: user.role,
@@ -128,12 +126,11 @@ export async function getDashboardSummary(
       organization: {},
       me: {
         staffProfileId: profile.id,
-        staffCode: profile.staffCode,
+        staffCode: profile.employeeCode,
         status: todayEvent?.status ?? null,
-        clockIn: todayEvent?.clockIn ?? null,
-        clockOut: todayEvent?.clockOut ?? null,
+        clockIn: todayEvent?.clockInAt ?? null,
+        clockOut: todayEvent?.clockOutAt ?? null,
         monthSummary: monthSummary as unknown as Record<string, number>,
-        wallet,
         todayShift: shift
           ? {
               type: shift.type,
@@ -151,21 +148,21 @@ export async function getDashboardSummary(
 
   const attendanceCounts = await fastify.db
     .select({
-      status: schema.attendanceEvents.status,
-      count: sql<number>`COUNT(DISTINCT ${schema.attendanceEvents.staffProfileId})`,
+      status: schema.employeeAttendance.status,
+      count: sql<number>`COUNT(DISTINCT ${schema.employeeAttendance.employeeId})`,
     })
-    .from(schema.attendanceEvents)
+    .from(schema.employeeAttendance)
     .innerJoin(
-      schema.staffProfiles,
-      eq(schema.staffProfiles.id, schema.attendanceEvents.staffProfileId)
+      schema.employees,
+      eq(schema.employees.id, schema.employeeAttendance.employeeId)
     )
     .where(
       and(
-        eq(schema.staffProfiles.organizationId, organizationId),
-        eq(schema.attendanceEvents.workDate, today)
+        eq(schema.employees.organizationId, organizationId),
+        eq(schema.employeeAttendance.workDate, today)
       )
     )
-    .groupBy(schema.attendanceEvents.status);
+    .groupBy(schema.employeeAttendance.status);
 
   const countFor = (statuses: string[]) =>
     attendanceCounts
@@ -174,19 +171,16 @@ export async function getDashboardSummary(
 
   const [openExceptions] = await fastify.db
     .select({ count: sql<number>`COUNT(*)` })
-    .from(schema.attendanceExceptions)
+    .from(schema.employeeAttendance)
     .innerJoin(
-      schema.attendanceEvents,
-      eq(schema.attendanceEvents.id, schema.attendanceExceptions.attendanceEventId)
-    )
-    .innerJoin(
-      schema.staffProfiles,
-      eq(schema.staffProfiles.id, schema.attendanceEvents.staffProfileId)
+      schema.employees,
+      eq(schema.employees.id, schema.employeeAttendance.employeeId)
     )
     .where(
       and(
-        eq(schema.staffProfiles.organizationId, organizationId),
-        eq(schema.attendanceExceptions.status, 'OPEN')
+        eq(schema.employees.organizationId, organizationId),
+        sql`${schema.employeeAttendance.consecutivePingFailures} >= 3`,
+        sql`${schema.employeeAttendance.correctedAt} IS NULL`
       )
     );
 
@@ -195,26 +189,18 @@ export async function getDashboardSummary(
     .from(schema.leaveRequests)
     .where(
       and(
-        eq(schema.leaveRequests.organisationId, organizationId),
+        eq(schema.leaveRequests.organizationId, organizationId),
         eq(schema.leaveRequests.status, 'PENDING')
       )
     );
 
-  const [liability] = await fastify.db
-    .select({
-      earned: sql<number>`COALESCE(SUM(${schema.wallets.earnedBalanceCents}), 0)`,
-      approved: sql<number>`COALESCE(SUM(${schema.wallets.approvedUnpaidBalanceCents}), 0)`,
-      paid: sql<number>`COALESCE(SUM(${schema.wallets.paidBalanceCents}), 0)`,
-    })
-    .from(schema.wallets)
-    .innerJoin(
-      schema.staffProfiles,
-      eq(schema.staffProfiles.id, schema.wallets.staffProfileId)
-    )
-    .where(eq(schema.staffProfiles.organizationId, organizationId));
-
-  const now = new Date();
-  const summaries = await listMonthlyPayrollSummaries(fastify, organizationId, now.getMonth() + 1, now.getFullYear());
+  const [currentYear, currentMonth] = today.split('-').map(Number);
+  const summaries = await listMonthlyPayrollSummaries(
+    fastify,
+    organizationId,
+    currentMonth,
+    currentYear
+  );
   const latest = summaries[0] ?? null;
 
   return {
@@ -236,11 +222,6 @@ export async function getDashboardSummary(
             netSalaryCents: Math.round(Number(latest.dueAmount) * 100),
           }
         : null,
-      walletLiability: {
-        earnedBalanceCents: Number(liability?.earned ?? 0),
-        approvedUnpaidBalanceCents: Number(liability?.approved ?? 0),
-        paidBalanceCents: Number(liability?.paid ?? 0),
-      },
     },
     me: undefined,
   };
@@ -293,8 +274,33 @@ export async function buildPayrollReport(
   organizationId: string,
   periodId: string
 ): Promise<ReportTable> {
-  const now = new Date();
-  const items = await listMonthlyPayrollSummaries(fastify, organizationId, now.getMonth() + 1, now.getFullYear());
+  const [item] = await fastify.db
+    .select({
+      staffCode: schema.employees.employeeCode,
+      staffName: schema.users.fullName,
+      earnedAmount: schema.monthlyPayrolls.earnedAmount,
+      deductionAmount: schema.monthlyPayrolls.deductionAmount,
+      paidAmount: schema.monthlyPayrolls.paidAmount,
+      dueAmount: schema.monthlyPayrolls.dueAmount,
+      status: schema.monthlyPayrolls.status,
+    })
+    .from(schema.monthlyPayrolls)
+    .innerJoin(
+      schema.employees,
+      eq(schema.employees.id, schema.monthlyPayrolls.employeeId)
+    )
+    .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
+    .where(
+      and(
+        eq(schema.monthlyPayrolls.id, periodId),
+        eq(schema.monthlyPayrolls.organizationId, organizationId)
+      )
+    )
+    .limit(1);
+
+  if (!item) {
+    throw new AppError('Payroll period not found', 404, 'PAYROLL_NOT_FOUND');
+  }
 
   return {
     title: 'Payroll Report',
@@ -309,7 +315,7 @@ export async function buildPayrollReport(
       'Due (INR)',
       'Status',
     ],
-    rows: items.map((item: any) => [
+    rows: [[
       item.staffCode ?? '',
       item.staffName ?? '',
       item.earnedAmount,
@@ -318,70 +324,7 @@ export async function buildPayrollReport(
       item.dueAmount,
       formatMoney(Math.round(Number(item.dueAmount) * 100)),
       item.status,
-    ]),
-  };
-}
-
-export async function buildWalletReport(
-  fastify: FastifyInstance,
-  user: { userId: string; role: 'OWNER' | 'MANAGER' | 'STAFF' },
-  organizationId: string
-): Promise<ReportTable> {
-  if (user.role === 'STAFF') {
-    const summary = await getWalletSummary(fastify, user.userId, organizationId);
-    return {
-      title: 'My Wallet Report',
-      columns: ['Staff Profile', 'Earned (paise)', 'Approved Unpaid (paise)', 'Paid (paise)', 'Total (paise)', 'Total (INR)'],
-      rows: [
-        [
-          summary.staffProfileId,
-          summary.earnedBalanceCents,
-          summary.approvedUnpaidBalanceCents,
-          summary.paidBalanceCents,
-          summary.totalBalanceCents,
-          formatMoney(summary.totalBalanceCents),
-        ],
-      ],
-    };
-  }
-
-  const rows = await fastify.db
-    .select({
-      staffCode: schema.staffProfiles.staffCode,
-      staffName: schema.users.fullName,
-      earned: schema.wallets.earnedBalanceCents,
-      approved: schema.wallets.approvedUnpaidBalanceCents,
-      paid: schema.wallets.paidBalanceCents,
-    })
-    .from(schema.wallets)
-    .innerJoin(
-      schema.staffProfiles,
-      eq(schema.staffProfiles.id, schema.wallets.staffProfileId)
-    )
-    .innerJoin(schema.users, eq(schema.users.id, schema.staffProfiles.userId))
-    .where(eq(schema.staffProfiles.organizationId, organizationId))
-    .orderBy(schema.users.fullName);
-
-  return {
-    title: 'Wallet Liability Report',
-    columns: [
-      'Staff Code',
-      'Staff Name',
-      'Earned (paise)',
-      'Approved Unpaid (paise)',
-      'Paid (paise)',
-      'Total (paise)',
-      'Total (INR)',
-    ],
-    rows: rows.map((row) => [
-      row.staffCode,
-      row.staffName,
-      row.earned,
-      row.approved,
-      row.paid,
-      row.earned + row.approved + row.paid,
-      formatMoney(row.earned + row.approved + row.paid),
-    ]),
+    ]],
   };
 }
 

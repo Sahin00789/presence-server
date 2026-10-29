@@ -48,6 +48,7 @@ export default fp(async (fastify) => {
 
       if (deviceRecord && !deviceRecord.isActive) {
         return reply.status(401).send({
+          status: 'error',
           statusCode: 401,
           error: 'Unauthorized',
           code: 'DEVICE_REVOKED',
@@ -65,6 +66,7 @@ export default fp(async (fastify) => {
 
       if (!userRecord || !userRecord.isActive) {
         return reply.status(403).send({
+          status: 'error',
           statusCode: 403,
           error: 'Forbidden',
           code: 'ACCOUNT_DEACTIVATED',
@@ -73,29 +75,72 @@ export default fp(async (fastify) => {
         });
       }
 
-      // 3. PostgreSQL Organization Membership Verification
-      const [membership] = await fastify.db
-        .select({ isActive: schema.memberships.isActive })
-        .from(schema.memberships)
-        .where(
-          and(
-            eq(schema.memberships.userId, payload.userId),
-            eq(schema.memberships.organizationId, payload.organizationId)
-          )
-        )
+      // 3. PostgreSQL Organization Access Verification
+      // Owners are identified by organizations.owner_user_id; Managers and
+      // Staff by their active employee record. Roles are re-read from the
+      // database so a stale token can never retain elevated privileges.
+      const [organization] = await fastify.db
+        .select({ ownerUserId: schema.organizations.ownerUserId })
+        .from(schema.organizations)
+        .where(eq(schema.organizations.id, payload.organizationId))
         .limit(1);
 
-      if (!membership || !membership.isActive) {
+      if (!organization) {
         return reply.status(403).send({
+          status: 'error',
+          statusCode: 403,
+          error: 'Forbidden',
+          code: 'ORGANIZATION_NOT_FOUND',
+          message: 'Your organization is no longer available.',
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      let authoritativeRole: 'OWNER' | 'MANAGER' | 'STAFF' | null = null;
+      if (organization.ownerUserId === payload.userId) {
+        authoritativeRole = 'OWNER';
+      } else {
+        const [employee] = await fastify.db
+          .select({ role: schema.employees.role })
+          .from(schema.employees)
+          .where(
+            and(
+              eq(schema.employees.userId, payload.userId),
+              eq(schema.employees.organizationId, payload.organizationId),
+              eq(schema.employees.isActive, true)
+            )
+          )
+          .limit(1);
+
+        if (employee) {
+          authoritativeRole = employee.role;
+        }
+      }
+
+      if (!authoritativeRole) {
+        return reply.status(403).send({
+          status: 'error',
           statusCode: 403,
           error: 'Forbidden',
           code: 'MEMBERSHIP_INACTIVE',
-          message: 'Your organization membership is no longer active.',
+          message: 'Your organization access is no longer active.',
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      if (authoritativeRole !== payload.role) {
+        return reply.status(403).send({
+          status: 'error',
+          statusCode: 403,
+          error: 'Forbidden',
+          code: 'ROLE_CHANGED',
+          message: 'Your role has changed. Please sign in again.',
           timestamp: new Date().toISOString(),
         });
       }
     } catch (err) {
       return reply.status(401).send({
+        status: 'error',
         statusCode: 401,
         error: 'Unauthorized',
         code: 'INVALID_TOKEN',

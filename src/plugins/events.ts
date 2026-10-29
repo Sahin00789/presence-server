@@ -24,7 +24,7 @@ declare module 'fastify' {
 }
 
 /**
- * WebSocket transport for real-time wallet, attendance, location, and notification updates
+ * WebSocket transport for real-time ledger, attendance, location, and notification updates
  * with organization, owner/manager, and premises room targeting.
  */
 export default fp(async (fastify: FastifyInstance) => {

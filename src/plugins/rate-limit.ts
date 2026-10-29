@@ -63,6 +63,7 @@ export default fp(async (fastify: FastifyInstance) => {
       if (!result.allowed) {
         reply.header('Retry-After', String(result.retryAfterSeconds || 1));
         return reply.status(429).send({
+          status: 'error',
           statusCode: 429,
           error: 'Too Many Requests',
           code: 'RATE_LIMIT_EXCEEDED',

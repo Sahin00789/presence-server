@@ -18,6 +18,7 @@ export const clockInSchema = z.object({
   liveness: livenessEvidenceSchema.optional(),
   /** Check in for an approved overtime entry instead of the regular shift. */
   overtimeId: z.string().uuid().optional(),
+  attendanceEventId: z.string().uuid().optional(),
 });
 
 export const manualClockInSchema = z.object({
@@ -95,7 +96,7 @@ export const exceptionSchema = z.object({
 });
 
 export const resolveExceptionSchema = z.object({
-  correctedStatus: z.enum(['PRESENT', 'ABSENT', 'HALF_DAY', 'LATE', 'HOLIDAY', 'RESUME']),
+  correctedStatus: z.enum(['PRESENT', 'ABSENT', 'HALF_DAY', 'LATE', 'HOLIDAY', 'LEAVE']),
   reason: z.string().min(2),
   note: z.string().optional(),
 });

@@ -29,34 +29,34 @@ export async function listOvertime(
   organizationId: string,
   query: { from?: string; to?: string; staffProfileId?: string; status?: string }
 ) {
-  const conditions = [eq(schema.overtimeRequests.organizationId, organizationId)];
+  const conditions = [eq(schema.overtime.organizationId, organizationId)];
 
   if (actor.role === 'STAFF') {
     const profile = await findStaffProfile(fastify, actor.userId, organizationId);
     if (!profile) {
       return [];
     }
-    conditions.push(eq(schema.overtimeRequests.staffProfileId, profile.id));
+    conditions.push(eq(schema.overtime.employeeId, profile.id));
   } else if (query.staffProfileId) {
-    conditions.push(eq(schema.overtimeRequests.staffProfileId, query.staffProfileId));
+    conditions.push(eq(schema.overtime.employeeId, query.staffProfileId));
   }
 
   if (query.status) {
-    conditions.push(eq(schema.overtimeRequests.status, query.status as never));
+    conditions.push(eq(schema.overtime.status, query.status as never));
   }
 
   const rows = await fastify.db
     .select({
-      overtime: schema.overtimeRequests,
+      overtime: schema.overtime,
       staffName: schema.users.fullName,
       staffEmail: schema.users.email,
-      staffCode: schema.staffProfiles.staffCode,
+      staffCode: schema.employees.employeeCode,
     })
-    .from(schema.overtimeRequests)
-    .innerJoin(schema.staffProfiles, eq(schema.staffProfiles.id, schema.overtimeRequests.staffProfileId))
-    .innerJoin(schema.users, eq(schema.users.id, schema.staffProfiles.userId))
+    .from(schema.overtime)
+    .innerJoin(schema.employees, eq(schema.employees.id, schema.overtime.employeeId))
+    .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
     .where(and(...conditions))
-    .orderBy(desc(schema.overtimeRequests.workDate), desc(schema.overtimeRequests.createdAt));
+    .orderBy(desc(schema.overtime.workDate), desc(schema.overtime.createdAt));
 
   const filtered =
     query.from || query.to
@@ -71,7 +71,7 @@ export async function listOvertime(
   return filtered.map((row) => ({
     id: row.overtime.id,
     organizationId: row.overtime.organizationId,
-    staffProfileId: row.overtime.staffProfileId,
+    staffProfileId: row.overtime.employeeId,
     staffName: row.staffName,
     staffEmail: row.staffEmail,
     staffCode: row.staffCode,
@@ -82,10 +82,10 @@ export async function listOvertime(
     endTime: row.overtime.endTime,
     plannedMinutes: row.overtime.plannedMinutes,
     workedMinutes: row.overtime.workedMinutes,
-    paymentCents: row.overtime.paymentCents,
+    paymentInr: row.overtime.paymentInr,
     status: row.overtime.status,
     reason: row.overtime.reason,
-    attendanceEventId: row.overtime.attendanceEventId,
+    attendanceEventId: row.overtime.attendanceId,
     resolvedAt: row.overtime.resolvedAt ? row.overtime.resolvedAt.toISOString() : null,
     createdAt: row.overtime.createdAt.toISOString(),
   }));
@@ -113,23 +113,60 @@ export async function createOvertime(
     );
   }
 
-  const targetProfileId = input.staffProfileId
-    ? input.staffProfileId
-    : (await ensureStaffProfile(fastify, actor.userId, organizationId)).id;
+  const targetProfileId = input.staffProfileId;
+  if (!targetProfileId) {
+    if (actor.role === 'MANAGER') {
+      throw new AppError(
+        'Managers cannot create their own overtime. Ask the Owner to raise it.',
+        403,
+        'OVERTIME_FORBIDDEN'
+      );
+    }
+    throw new AppError(
+      'Select a Manager or Staff member for this overtime.',
+      400,
+      'OVERTIME_TARGET_REQUIRED'
+    );
+  }
 
   const [targetProfile] = await fastify.db
-    .select({ id: schema.staffProfiles.id })
-    .from(schema.staffProfiles)
+    .select({
+      id: schema.employees.id,
+      userId: schema.employees.userId,
+      role: schema.employees.role,
+      premisesId: schema.employees.premisesId,
+    })
+    .from(schema.employees)
     .where(
       and(
-        eq(schema.staffProfiles.id, targetProfileId),
-        eq(schema.staffProfiles.organizationId, organizationId)
+        eq(schema.employees.id, targetProfileId),
+        eq(schema.employees.organizationId, organizationId),
+        eq(schema.employees.isActive, true)
       )
     )
     .limit(1);
 
   if (!targetProfile) {
     throw new AppError('Staff member not found', 404, 'STAFF_PROFILE_NOT_FOUND');
+  }
+
+  // Owners may raise overtime for Managers and Staff. Managers may only raise
+  // overtime for Staff members; a Manager's overtime must be created by the
+  // Owner.
+  if (targetProfile.role === 'MANAGER' && actor.role !== 'OWNER') {
+    throw new AppError(
+      'Only the Owner can create overtime for a Manager.',
+      403,
+      'OVERTIME_FORBIDDEN'
+    );
+  }
+
+  if (!targetProfile.premisesId) {
+    throw new AppError(
+      'Assign a premises to this employee before creating overtime.',
+      400,
+      'EMPLOYEE_PREMISES_REQUIRED'
+    );
   }
 
   const plannedMinutes = plannedOvertimeMinutes(input.startTime, input.endTime);
@@ -142,17 +179,18 @@ export async function createOvertime(
   }
 
   const [created] = await fastify.db
-    .insert(schema.overtimeRequests)
+    .insert(schema.overtime)
     .values({
       organizationId,
-      staffProfileId: targetProfileId,
+      premisesId: targetProfile.premisesId,
+      employeeId: targetProfileId,
       requestedBy: actor.userId,
       approvedBy: actor.userId,
       workDate: input.workDate,
       startTime: input.startTime,
       endTime: input.endTime,
       plannedMinutes,
-      paymentCents: input.paymentCents,
+      paymentInr: input.paymentInr,
       status: 'APPROVED',
       reason: input.reason,
     })
@@ -168,7 +206,7 @@ export async function createOvertime(
       staffProfileId: targetProfileId,
       workDate: input.workDate,
       plannedMinutes,
-      paymentCents: input.paymentCents,
+      paymentInr: input.paymentInr,
       selfAssigned: !input.staffProfileId,
     },
   });
@@ -177,17 +215,17 @@ export async function createOvertime(
     .select({
       fullName: schema.users.fullName,
       email: schema.users.email,
-      staffCode: schema.staffProfiles.staffCode,
+      staffCode: schema.employees.employeeCode,
     })
-    .from(schema.staffProfiles)
-    .innerJoin(schema.users, eq(schema.users.id, schema.staffProfiles.userId))
-    .where(eq(schema.staffProfiles.id, targetProfileId))
+    .from(schema.employees)
+    .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
+    .where(eq(schema.employees.id, targetProfileId))
     .limit(1);
 
   return {
     id: created.id,
     organizationId: created.organizationId,
-    staffProfileId: created.staffProfileId,
+    staffProfileId: created.employeeId,
     staffName: staff?.fullName ?? '',
     staffEmail: staff?.email ?? '',
     staffCode: staff?.staffCode ?? '',
@@ -198,10 +236,10 @@ export async function createOvertime(
     endTime: created.endTime,
     plannedMinutes: created.plannedMinutes,
     workedMinutes: created.workedMinutes,
-    paymentCents: created.paymentCents,
+    paymentInr: created.paymentInr,
     status: created.status,
     reason: created.reason,
-    attendanceEventId: created.attendanceEventId,
+    attendanceEventId: created.attendanceId,
     resolvedAt: null,
     createdAt: created.createdAt.toISOString(),
   };
@@ -218,11 +256,11 @@ export async function cancelOvertime(
 ) {
   const [overtime] = await fastify.db
     .select()
-    .from(schema.overtimeRequests)
+    .from(schema.overtime)
     .where(
       and(
-        eq(schema.overtimeRequests.id, overtimeId),
-        eq(schema.overtimeRequests.organizationId, organizationId)
+        eq(schema.overtime.id, overtimeId),
+        eq(schema.overtime.organizationId, organizationId)
       )
     )
     .limit(1);
@@ -240,9 +278,9 @@ export async function cancelOvertime(
   }
 
   const [updated] = await fastify.db
-    .update(schema.overtimeRequests)
+    .update(schema.overtime)
     .set({ status: 'CANCELLED', resolvedAt: new Date() })
-    .where(eq(schema.overtimeRequests.id, overtimeId))
+    .where(eq(schema.overtime.id, overtimeId))
     .returning();
 
   await writeAuditLog(fastify, {

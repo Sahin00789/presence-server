@@ -16,12 +16,48 @@ export default fp(async (fastify) => {
     max: env.NODE_ENV === 'production' ? 20 : 5,
     idle_timeout: 30,
     connect_timeout: 10,
+    onnotice: (notice) => {
+      fastify.log.debug({ code: notice.code, severity: notice.severity }, notice.message);
+    },
   });
 
   const db = drizzle(pgClient, { schema });
 
   fastify.decorate('pgClient', pgClient);
   fastify.decorate('db', db);
+
+  try {
+    const [{ exists: vectorExists }] = await pgClient`SELECT EXISTS (
+      SELECT 1 FROM pg_extension WHERE extname = 'vector'
+    )`;
+    if (!vectorExists) {
+      await pgClient`CREATE EXTENSION IF NOT EXISTS vector`;
+    }
+  } catch (err) {
+    fastify.log.warn({ err }, 'Failed to create vector extension');
+  }
+
+  try {
+    const [{ exists: tableExists }] = await pgClient`SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables 
+      WHERE table_schema = 'public' AND table_name = 'organizations'
+    )`;
+    if (tableExists) {
+      const [{ exists: columnExists }] = await pgClient`SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+          AND table_name = 'organizations' 
+          AND column_name = 'owner_user_id'
+      )`;
+      if (!columnExists) {
+        await pgClient`ALTER TABLE organizations ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE RESTRICT`;
+      }
+    } else {
+      fastify.log.debug('organizations table does not exist yet, skipping owner_user_id migration');
+    }
+  } catch (err) {
+    fastify.log.warn({ err }, 'Failed to ensure owner_user_id column on organizations');
+  }
 
   // Keep-alive ping for serverless databases (e.g. NeonDB free tier) to prevent compute auto-suspend / cold starts
   const KEEP_ALIVE_INTERVAL_MS = 4 * 60 * 1000; // 4 minutes

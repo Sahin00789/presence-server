@@ -41,13 +41,6 @@ export const dashboardSummarySchema = z.object({
       })
       .nullable()
       .optional(),
-    walletLiability: z
-      .object({
-        earnedBalanceCents: z.number().int(),
-        approvedUnpaidBalanceCents: z.number().int(),
-        paidBalanceCents: z.number().int(),
-      })
-      .optional(),
   }),
   me: z
     .object({
@@ -57,12 +50,6 @@ export const dashboardSummarySchema = z.object({
       clockIn: z.date().or(z.string()).nullable(),
       clockOut: z.date().or(z.string()).nullable(),
       monthSummary: z.record(z.string(), z.number()),
-      wallet: z.object({
-        earnedBalanceCents: z.number().int(),
-        approvedUnpaidBalanceCents: z.number().int(),
-        paidBalanceCents: z.number().int(),
-        totalBalanceCents: z.number().int(),
-      }),
       todayShift: z
         .object({
           type: z.string(),

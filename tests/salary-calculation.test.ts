@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { calculateDailyAccrual, calculateSalary } from '../src/modules/salary/service.js';
+import { calculateDailyAccrual, calculateSalary } from '../src/modules/payroll/service.js';
 
 const baseSummary = {
   presentDays: 20,

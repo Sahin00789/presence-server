@@ -2,7 +2,6 @@ import { FastifyInstance } from 'fastify';
 import { EventEmitter } from 'node:events';
 
 export type DomainEventType =
-  | 'wallet_update'
   | 'attendance_update'
   | 'exception_raised'
   | 'payroll_update'
@@ -35,13 +34,6 @@ export const DOMAIN_EVENT_CHANNEL = 'presence:domain-events';
  */
 export const domainEventBus = new EventEmitter();
 domainEventBus.setMaxListeners(0);
-
-export interface WalletUpdatePayload {
-  staffProfileId: string;
-  earnedBalanceCents: number;
-  approvedUnpaidBalanceCents: number;
-  paidBalanceCents: number;
-}
 
 export interface AttendanceUpdatePayload {
   staffProfileId: string;

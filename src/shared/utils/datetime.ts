@@ -41,6 +41,18 @@ export function toDateISO(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
+/**
+ * `Date` -> `YYYY-MM-DD` in an IANA timezone. Attendance work dates must be
+ * resolved in the organization's timezone, never the server's UTC day.
+ */
+export function toDateISOInTimeZone(
+  date: Date,
+  timeZone: string = DEFAULT_TIMEZONE
+): string {
+  const offset = getTimeZoneOffsetMs(timeZone, date);
+  return new Date(date.getTime() + offset).toISOString().slice(0, 10);
+}
+
 export function addDays(dateISO: string, days: number): string {
   const date = parseDateISO(dateISO);
   date.setUTCDate(date.getUTCDate() + days);
@@ -146,7 +158,7 @@ export function resolveShiftWindow(
   workDate: string,
   startTime: string,
   endTime: string,
-  breakMinutes: number,
+  breakMinutes: number = 0,
   timeZone: string = DEFAULT_TIMEZONE
 ): ShiftWindow {
   const overnight = isOvernightShift(startTime, endTime);

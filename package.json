@@ -1,7 +1,7 @@
 {
   "name": "presence-server",
   "version": "1.0.0",
-  "description": "Fastify TypeScript Backend API for Staff Attendance, Shift Management & Salary Wallet System",
+  "description": "Fastify TypeScript Backend API for Staff Attendance, Shift Management & Salary Ledger System",
   "main": "dist/server.js",
   "type": "commonjs",
   "scripts": {

@@ -5,57 +5,22 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1792643000048,
-      "tag": "0000_nice_steve_rogers",
+      "when": 1793129079778,
+      "tag": "0000_living_nekra",
       "breakpoints": true
     },
     {
       "idx": 1,
       "version": "7",
-      "when": 1792645602372,
-      "tag": "0001_melodic_ultron",
+      "when": 1793199057659,
+      "tag": "0001_clean_exiles",
       "breakpoints": true
     },
     {
       "idx": 2,
       "version": "7",
-      "when": 1792659250791,
-      "tag": "0002_faulty_wolf_cub",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "7",
-      "when": 1792742104028,
-      "tag": "0003_military_jack_flag",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "7",
-      "when": 1792747581103,
-      "tag": "0004_quick_odin",
-      "breakpoints": true
-    },
-    {
-      "idx": 5,
-      "version": "7",
-      "when": 1792749446923,
-      "tag": "0005_fix_worked_day_schema",
-      "breakpoints": true
-    },
-    {
-      "idx": 6,
-      "version": "7",
-      "when": 1792751653988,
-      "tag": "0006_wise_sister_grimm",
-      "breakpoints": true
-    },
-    {
-      "idx": 7,
-      "version": "7",
-      "when": 1792759197668,
-      "tag": "0007_fearless_slapstick",
+      "when": 1793205190398,
+      "tag": "0002_curly_quasimodo",
       "breakpoints": true
     }
   ]

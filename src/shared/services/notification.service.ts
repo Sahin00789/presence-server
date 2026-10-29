@@ -9,7 +9,6 @@ export type NotificationType =
   | 'LEAVE_REQUESTED'
   | 'LEAVE_APPROVED'
   | 'LEAVE_REJECTED'
-  | 'WALLET_UPDATED'
   | 'PAYROLL_READY'
   | 'PAYROLL_APPROVED'
   | 'PAYROLL_PAID';

@@ -1,0 +1,1 @@
+src/modules/attendance/service.ts(1394,11): error TS2367: This comparison appears to be unintentional because the types '"PRESENT" | "LATE" | "HOLIDAY"' and '"LEAVE"' have no overlap.

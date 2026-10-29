@@ -64,8 +64,10 @@ describe('Single-Shift Leave Request Module', () => {
         leave: {
           id: 'c0eebc99-9c0b-4ef8-bb6d-6bb9bd380a33',
           organisationId: 'd0eebc99-9c0b-4ef8-bb6d-6bb9bd380a44',
+          organizationId: 'd0eebc99-9c0b-4ef8-bb6d-6bb9bd380a44',
           premisesId: 'e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a55',
           staffId: 'f0eebc99-9c0b-4ef8-bb6d-6bb9bd380a66',
+          employeeId: 'f0eebc99-9c0b-4ef8-bb6d-6bb9bd380a66',
           shiftAssignmentId: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
           workDate: '2025-06-15',
           reason: 'Personal leave',

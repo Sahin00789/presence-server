@@ -5,23 +5,16 @@ import {
   attendanceRecordSchema,
   attendanceRecordsQuerySchema,
   clockInSchema,
-  clockOutSchema,
   correctDailyAttendanceSchema,
   dailyAttendanceSchema,
-  manualClockInSchema,
-  exceptionSchema,
-  resolveExceptionSchema,
 } from './schemas.js';
 import {
   clockIn,
-  clockOut,
-  correctDailyAttendance,
   getDailyAttendanceByDateAndPremises,
   getEmployeeAttendanceAndEarningsHistory,
+  getUpcomingAttendance,
   listAttendanceRecords,
-  listExceptions,
-  requestManualClockIn,
-  resolveException,
+  manualMarkAttendance,
   toPublicAttendanceEvent,
 } from './service.js';
 import { z } from 'zod';
@@ -32,7 +25,7 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
   server.post(
     '/api/v1/attendance/clock-in',
     {
-      preHandler: [fastify.authenticate],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('MANAGER', 'STAFF')],
       schema: {
         description: 'Clock in with location and face verification',
         tags: ['Attendance'],
@@ -53,58 +46,40 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
     }
   );
 
+
+
   server.post(
-    '/api/v1/attendance/clock-in/manual',
+    '/api/v1/attendance/manual-mark',
     {
-      preHandler: [fastify.authenticate],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
       schema: {
-        description:
-          'Request a manual clock-in when on-device face verification is unavailable. Always requires Manager or Owner review.',
+        description: 'Manual mark attendance for shift/overtime (ABSENT/HALF_DAY/LEAVE or delete overtime). Available after clock-in and before shift/overtime ends.',
         tags: ['Attendance'],
-        body: manualClockInSchema,
+        body: z.object({
+          attendanceEventId: z.string().uuid().optional(),
+          employeeId: z.string().uuid().optional(),
+          workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          overtimeId: z.string().uuid().optional(),
+          action: z.enum(['ABSENT', 'HALF_DAY', 'LEAVE', 'DELETE_OVERTIME']),
+          reason: z.string().min(3).max(500).optional(),
+        }),
         response: {
-          200: z.object({
-            event: attendanceEventSchema,
-            exceptionId: z.string().uuid(),
-            status: z.literal('PENDING_REVIEW'),
-          }),
+          200: attendanceEventSchema.or(z.object({ deleted: z.boolean(), overtimeId: z.string().uuid() })),
         },
       },
     },
     async (request, reply) => {
-      const result = await requestManualClockIn(
+      const result = await manualMarkAttendance(
         fastify,
-        request.user.userId,
         request.user.organizationId,
-        request.body
+        request.user.userId,
+        request.body as any
       );
-      return reply.send(result);
+      return reply.send(result as any);
     }
   );
 
-  server.post(
-    '/api/v1/attendance/clock-out',
-    {
-      preHandler: [fastify.authenticate],
-      schema: {
-        description: 'Clock out of the active attendance event',
-        tags: ['Attendance'],
-        body: clockOutSchema,
-        response: {
-          200: attendanceEventSchema,
-        },
-      },
-    },
-    async (request, reply) => {
-      const result = await clockOut(
-        fastify,
-        request.user.userId,
-        request.user.organizationId,
-        request.body
-      );
-      return reply.send(toPublicAttendanceEvent(result));
-    }
-  );
+
 
   server.get(
     '/api/v1/attendance/records',
@@ -131,55 +106,7 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
     }
   );
 
-  server.get(
-    '/api/v1/attendance/exceptions',
-    {
-      preHandler: [fastify.authenticate],
-      schema: {
-        description:
-          'List attendance and GPS exceptions. Staff receive their own, Owners and Managers receive the whole organization.',
-        tags: ['Attendance'],
-        response: {
-          200: z.array(exceptionSchema),
-        },
-      },
-    },
-    async (request, reply) => {
-      const result = await listExceptions(fastify, request.user, request.user.organizationId);
-      return reply.send(result);
-    }
-  );
 
-  server.post(
-    '/api/v1/attendance/exceptions/:exceptionId/resolve',
-    {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
-      schema: {
-        description: 'Resolve an attendance exception with an approved correction',
-        tags: ['Attendance'],
-        params: z.object({ exceptionId: z.string().uuid() }),
-        body: resolveExceptionSchema,
-        response: {
-          200: z.object({
-            id: z.string().uuid(),
-            status: z.literal('RESOLVED'),
-            correctedStatus: z.enum(['PRESENT', 'ABSENT', 'HALF_DAY', 'LATE', 'HOLIDAY', 'RESUME']),
-          }),
-        },
-      },
-    },
-    async (request, reply) => {
-      const { exceptionId } = request.params as { exceptionId: string };
-      const result = await resolveException(
-        fastify,
-        request.user.organizationId,
-        request.user.userId,
-        exceptionId,
-        request.body
-      );
-      return reply.send(result);
-    }
-  );
 
   server.get(
     '/api/v1/attendance/daily',
@@ -209,59 +136,62 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
     }
   );
 
-  server.post(
-    '/api/v1/attendance/daily/:id/correct',
-    {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
-      schema: {
-        description: 'Allow authorised managers to correct daily attendance status and payment',
-        tags: ['Attendance'],
-        params: z.object({ id: z.string().uuid() }),
-        body: correctDailyAttendanceSchema,
-        response: {
-          200: z.object({
-            id: z.string().uuid(),
-            attendanceStatus: z.enum(['PRESENT', 'ABSENT', 'LEAVE', 'HALF_DAY']),
-            paymentAmount: z.string().or(z.number()),
-          }),
-        },
-      },
-    },
-    async (request, reply) => {
-      const { id } = request.params as { id: string };
-      const result = await correctDailyAttendance(
-        fastify,
-        request.user.userId,
-        request.user.organizationId,
-        id,
-        request.body
-      );
-      return reply.send(result as any);
-    }
-  );
+
 
   server.get(
     '/api/v1/attendance/my-history',
     {
-      preHandler: [fastify.authenticate],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('MANAGER', 'STAFF')],
       schema: {
         description: 'Retrieve employee daily attendance and earnings history',
         tags: ['Attendance'],
         querystring: z.object({
           from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
           to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          month: z.string().regex(/^\d{4}-\d{2}$/).optional(),
+          year: z.coerce.number().optional(),
         }),
       },
     },
     async (request, reply) => {
-      const { from, to } = request.query as { from?: string; to?: string };
+      const { from, to, month, year } = request.query as { from?: string; to?: string; month?: string; year?: number };
+      let f = from;
+      let t = to;
+      if (month && !f && !t) {
+        const [y, m] = month.split('-').map((v) => parseInt(v));
+        f = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-01`;
+        const last = new Date(y, m, 0).getDate();
+        t = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(last).padStart(2, '0')}`;
+      } else if (year && !month && !f && !t) {
+        f = `${year}-01-01`;
+        t = `${year}-12-31`;
+      }
       const result = await getEmployeeAttendanceAndEarningsHistory(
         fastify,
         request.user.organizationId,
         request.user.userId,
-        from,
-        to
+        f,
+        t
       );
+      return reply.send(result as any);
+    }
+  );
+
+  server.get(
+    '/api/v1/attendance/upcoming',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('MANAGER', 'STAFF')],
+      schema: {
+        description: 'Fetch upcoming shift or overtime for the authenticated user',
+        tags: ['Attendance'],
+        querystring: z.object({
+          date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const { date } = request.query as { date?: string };
+      const result = await getUpcomingAttendance(fastify, request.user.organizationId, request.user.userId, date);
       return reply.send(result as any);
     }
   );

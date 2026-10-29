@@ -10,7 +10,11 @@ import {
   listManagerUserIds,
   listOwnerUserIds,
 } from '../../shared/services/staff.service.js';
-import { dayOfWeek } from '../../shared/utils/datetime.js';
+import {
+  dayOfWeek,
+  isOvernightShift,
+  parseTimeToMinutes,
+} from '../../shared/utils/datetime.js';
 
 type Role = 'OWNER' | 'MANAGER' | 'STAFF';
 
@@ -40,8 +44,8 @@ export function mapLeave(row: {
     organizationId: row.leave.organizationId,
     premisesId: row.leave.premisesId,
     premisesName: row.premisesName ?? 'Main Premises',
-    staffId: row.leave.staffProfileId,
-    staffProfileId: row.leave.staffProfileId,
+    staffId: row.leave.employeeId,
+    staffProfileId: row.leave.employeeId,
     staffName: row.staffName,
     staffCode: row.staffCode,
     shiftAssignmentId: row.leave.shiftAssignmentId,
@@ -84,7 +88,7 @@ export async function createLeaveRequest(
       id: schema.employeeShiftAssignments.id,
       organizationId: schema.employeeShiftAssignments.organizationId,
       premisesId: schema.employeeShiftAssignments.premisesId,
-      staffProfileId: schema.employeeShiftAssignments.staffProfileId,
+      staffProfileId: schema.employeeShiftAssignments.employeeId,
       shiftName: schema.shifts.shiftName,
       startTime: schema.shifts.startTime,
       endTime: schema.shifts.endTime,
@@ -96,7 +100,7 @@ export async function createLeaveRequest(
     .where(
       and(
         eq(schema.employeeShiftAssignments.id, input.shiftAssignmentId),
-        eq(schema.employeeShiftAssignments.staffProfileId, profile.id),
+        eq(schema.employeeShiftAssignments.employeeId, profile.id),
         eq(schema.employeeShiftAssignments.organizationId, organizationId),
         eq(schema.employeeShiftAssignments.isActive, true)
       )
@@ -135,15 +139,15 @@ export async function createLeaveRequest(
   // 4. Check if employee has already clocked in or completed conflicting attendance.
   const [existingAttendance] = await fastify.db
     .select({
-      id: schema.dailyAttendance.id,
-      clockInAt: schema.dailyAttendance.clockInAt,
-      attendanceStatus: schema.dailyAttendance.attendanceStatus,
+      id: schema.employeeAttendance.id,
+      clockInAt: schema.employeeAttendance.clockInAt,
+      status: schema.employeeAttendance.status,
     })
-    .from(schema.dailyAttendance)
+    .from(schema.employeeAttendance)
     .where(
       and(
-        eq(schema.dailyAttendance.shiftAssignmentId, input.shiftAssignmentId),
-        eq(schema.dailyAttendance.workDate, input.workDate)
+        eq(schema.employeeAttendance.shiftAssignmentId, input.shiftAssignmentId),
+        eq(schema.employeeAttendance.workDate, input.workDate)
       )
     )
     .limit(1);
@@ -151,7 +155,7 @@ export async function createLeaveRequest(
   if (
     existingAttendance &&
     (existingAttendance.clockInAt !== null ||
-      ['PRESENT', 'LATE', 'HALF_DAY'].includes(existingAttendance.attendanceStatus))
+      ['PRESENT', 'LATE', 'HALF_DAY'].includes(existingAttendance.status))
   ) {
     throw new AppError(
       'Cannot request leave: Attendance or clock-in has already been recorded for this date',
@@ -166,10 +170,11 @@ export async function createLeaveRequest(
     .values({
       organizationId: organizationId,
       premisesId: assignment.premisesId,
-      staffProfileId: profile.id,
+      employeeId: profile.id,
       shiftAssignmentId: input.shiftAssignmentId,
       workDate: input.workDate,
       reason: input.reason,
+      requestedBy: user.userId,
       status: 'PENDING',
     })
     .returning();
@@ -183,10 +188,10 @@ export async function createLeaveRequest(
   );
 
   const [staffUser] = await fastify.db
-    .select({ fullName: schema.users.fullName, staffCode: schema.staffProfiles.staffCode })
-    .from(schema.staffProfiles)
-    .innerJoin(schema.users, eq(schema.users.id, schema.staffProfiles.userId))
-    .where(eq(schema.staffProfiles.id, profile.id))
+    .select({ fullName: schema.users.fullName, staffCode: schema.employees.employeeCode })
+    .from(schema.employees)
+    .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
+    .where(eq(schema.employees.id, profile.id))
     .limit(1);
 
   for (const reviewerId of reviewerIds) {
@@ -241,11 +246,11 @@ export async function listLeaveRequests(
     if (!profile) {
       return [];
     }
-    conditions.push(eq(schema.leaveRequests.staffProfileId, profile.id));
+    conditions.push(eq(schema.leaveRequests.employeeId, profile.id));
   } else {
     const targetStaffId = query.staffId ?? query.staffProfileId;
     if (targetStaffId) {
-      conditions.push(eq(schema.leaveRequests.staffProfileId, targetStaffId));
+      conditions.push(eq(schema.leaveRequests.employeeId, targetStaffId));
     }
     if (query.premisesId) {
       conditions.push(eq(schema.leaveRequests.premisesId, query.premisesId));
@@ -266,7 +271,7 @@ export async function listLeaveRequests(
     .select({
       leave: schema.leaveRequests,
       staffName: schema.users.fullName,
-      staffCode: schema.staffProfiles.staffCode,
+      staffCode: schema.employees.employeeCode,
       premisesName: schema.premises.name,
       shiftName: schema.shifts.shiftName,
       startTime: schema.shifts.startTime,
@@ -274,8 +279,8 @@ export async function listLeaveRequests(
       reviewedByName: reviewingUsers.fullName,
     })
     .from(schema.leaveRequests)
-    .innerJoin(schema.staffProfiles, eq(schema.staffProfiles.id, schema.leaveRequests.staffProfileId))
-    .innerJoin(schema.users, eq(schema.users.id, schema.staffProfiles.userId))
+    .innerJoin(schema.employees, eq(schema.employees.id, schema.leaveRequests.employeeId))
+    .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
     .innerJoin(schema.premises, eq(schema.premises.id, schema.leaveRequests.premisesId))
     .innerJoin(
       schema.employeeShiftAssignments,
@@ -305,14 +310,14 @@ export async function getLeaveRequestDetails(
     if (!profile) {
       throw new AppError('Leave request not found', 404, 'LEAVE_REQUEST_NOT_FOUND');
     }
-    conditions.push(eq(schema.leaveRequests.staffProfileId, profile.id));
+    conditions.push(eq(schema.leaveRequests.employeeId, profile.id));
   }
 
   const [row] = await fastify.db
     .select({
       leave: schema.leaveRequests,
       staffName: schema.users.fullName,
-      staffCode: schema.staffProfiles.staffCode,
+      staffCode: schema.employees.employeeCode,
       premisesName: schema.premises.name,
       shiftName: schema.shifts.shiftName,
       startTime: schema.shifts.startTime,
@@ -320,8 +325,8 @@ export async function getLeaveRequestDetails(
       reviewedByName: reviewingUsers.fullName,
     })
     .from(schema.leaveRequests)
-    .innerJoin(schema.staffProfiles, eq(schema.staffProfiles.id, schema.leaveRequests.staffProfileId))
-    .innerJoin(schema.users, eq(schema.users.id, schema.staffProfiles.userId))
+    .innerJoin(schema.employees, eq(schema.employees.id, schema.leaveRequests.employeeId))
+    .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
     .innerJoin(schema.premises, eq(schema.premises.id, schema.leaveRequests.premisesId))
     .innerJoin(
       schema.employeeShiftAssignments,
@@ -352,17 +357,17 @@ export async function reviewLeaveRequest(
   const [row] = await fastify.db
     .select({
       leave: schema.leaveRequests,
-      staffUserId: schema.staffProfiles.userId,
+      staffUserId: schema.employees.userId,
       staffName: schema.users.fullName,
-      staffCode: schema.staffProfiles.staffCode,
+      staffCode: schema.employees.employeeCode,
       premisesName: schema.premises.name,
       shiftName: schema.shifts.shiftName,
       startTime: schema.shifts.startTime,
       endTime: schema.shifts.endTime,
     })
     .from(schema.leaveRequests)
-    .innerJoin(schema.staffProfiles, eq(schema.staffProfiles.id, schema.leaveRequests.staffProfileId))
-    .innerJoin(schema.users, eq(schema.users.id, schema.staffProfiles.userId))
+    .innerJoin(schema.employees, eq(schema.employees.id, schema.leaveRequests.employeeId))
+    .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
     .innerJoin(schema.premises, eq(schema.premises.id, schema.leaveRequests.premisesId))
     .innerJoin(
       schema.employeeShiftAssignments,
@@ -418,16 +423,16 @@ export async function reviewLeaveRequest(
       // 3. Check for conflicting attendance.
       const [existingAttendance] = await tx
         .select({
-          id: schema.dailyAttendance.id,
-          clockInAt: schema.dailyAttendance.clockInAt,
-          clockOutAt: schema.dailyAttendance.clockOutAt,
-          attendanceStatus: schema.dailyAttendance.attendanceStatus,
+          id: schema.employeeAttendance.id,
+          clockInAt: schema.employeeAttendance.clockInAt,
+          clockOutAt: schema.employeeAttendance.clockOutAt,
+          status: schema.employeeAttendance.status,
         })
-        .from(schema.dailyAttendance)
+        .from(schema.employeeAttendance)
         .where(
           and(
-            eq(schema.dailyAttendance.shiftAssignmentId, row.leave.shiftAssignmentId),
-            eq(schema.dailyAttendance.workDate, row.leave.workDate)
+            eq(schema.employeeAttendance.shiftAssignmentId, row.leave.shiftAssignmentId),
+            eq(schema.employeeAttendance.workDate, row.leave.workDate)
           )
         )
         .limit(1);
@@ -436,7 +441,7 @@ export async function reviewLeaveRequest(
         existingAttendance &&
         (existingAttendance.clockInAt !== null ||
           existingAttendance.clockOutAt !== null ||
-          ['PRESENT', 'LATE', 'HALF_DAY'].includes(existingAttendance.attendanceStatus))
+          ['PRESENT', 'LATE', 'HALF_DAY'].includes(existingAttendance.status))
       ) {
         throw new AppError(
           'Cannot approve leave: Conflicting attendance or clock-in record exists for this date. A manager must resolve the conflict first.',
@@ -445,32 +450,41 @@ export async function reviewLeaveRequest(
         );
       }
 
-      const leavePayAmount = assignment.leavePay ?? '0.00';
+      const shiftStart = parseTimeToMinutes(row.startTime);
+      const shiftEnd = parseTimeToMinutes(row.endTime);
+      const scheduledMinutes = Math.max(
+        0,
+        isOvernightShift(row.startTime, row.endTime)
+          ? 24 * 60 - shiftStart + shiftEnd
+          : shiftEnd - shiftStart
+      );
 
-      // 4. Create or update daily attendance record.
+      // 4. Create or update the single attendance row for this shift occurrence.
       if (!existingAttendance) {
-        await tx.insert(schema.dailyAttendance).values({
+        await tx.insert(schema.employeeAttendance).values({
           organizationId: row.leave.organizationId,
           premisesId: row.leave.premisesId,
-          staffProfileId: row.leave.staffProfileId,
+          employeeId: row.leave.employeeId,
           shiftAssignmentId: row.leave.shiftAssignmentId,
+          attendanceType: 'SHIFT',
           workDate: row.leave.workDate,
-          attendanceStatus: 'LEAVE',
-          paymentAmount: leavePayAmount,
+          status: 'LEAVE',
+          scheduledMinutes,
+          workedMinutes: 0,
           statusUpdatedBy: actorUserId,
           remarks: `Leave approved: ${row.leave.reason}`,
         });
       } else {
         await tx
-          .update(schema.dailyAttendance)
+          .update(schema.employeeAttendance)
           .set({
-            attendanceStatus: 'LEAVE',
-            paymentAmount: leavePayAmount,
+            status: 'LEAVE',
+            scheduledMinutes,
             statusUpdatedBy: actorUserId,
             remarks: `Leave approved: ${row.leave.reason}`,
             updatedAt: new Date(),
           })
-          .where(eq(schema.dailyAttendance.id, existingAttendance.id));
+          .where(eq(schema.employeeAttendance.id, existingAttendance.id));
       }
 
       // 5. Update leave request to APPROVED.
@@ -512,20 +526,22 @@ export async function reviewLeaveRequest(
     .where(eq(schema.users.id, actorUserId))
     .limit(1);
 
-  await createNotification(fastify, {
-    organizationId,
-    userId: row.staffUserId,
-    type: input.decision === 'APPROVED' ? 'LEAVE_APPROVED' : 'LEAVE_REJECTED',
-    title: input.decision === 'APPROVED' ? 'Leave approved' : 'Leave rejected',
-    body:
-      input.decision === 'APPROVED'
-        ? `Your leave request for ${row.shiftName} on ${row.leave.workDate} was approved.`
-        : `Your leave request for ${row.shiftName} on ${row.leave.workDate} was rejected.${
-            remarks ? ` Remarks: ${remarks}` : ''
-          }`,
-    dedupeKey: `leave-review:${leaveRequestId}:${input.decision}`,
-    metadata: { leaveRequestId, decision: input.decision, workDate: row.leave.workDate },
-  });
+  if (row.staffUserId) {
+    await createNotification(fastify, {
+      organizationId,
+      userId: row.staffUserId,
+      type: input.decision === 'APPROVED' ? 'LEAVE_APPROVED' : 'LEAVE_REJECTED',
+      title: input.decision === 'APPROVED' ? 'Leave approved' : 'Leave rejected',
+      body:
+        input.decision === 'APPROVED'
+          ? `Your leave request for ${row.shiftName} on ${row.leave.workDate} was approved.`
+          : `Your leave request for ${row.shiftName} on ${row.leave.workDate} was rejected.${
+              remarks ? ` Remarks: ${remarks}` : ''
+            }`,
+      dedupeKey: `leave-review:${leaveRequestId}:${input.decision}`,
+      metadata: { leaveRequestId, decision: input.decision, workDate: row.leave.workDate },
+    });
+  }
 
   await writeAuditLog(fastify, {
     organizationId,
@@ -557,10 +573,10 @@ export async function cancelLeaveRequest(
   const [row] = await fastify.db
     .select({
       leave: schema.leaveRequests,
-      staffUserId: schema.staffProfiles.userId,
+      staffUserId: schema.employees.userId,
     })
     .from(schema.leaveRequests)
-    .innerJoin(schema.staffProfiles, eq(schema.staffProfiles.id, schema.leaveRequests.staffProfileId))
+    .innerJoin(schema.employees, eq(schema.employees.id, schema.leaveRequests.employeeId))
     .where(
       and(
         eq(schema.leaveRequests.id, leaveRequestId),

@@ -165,7 +165,7 @@ export async function sendOtpEmail(params: SendOtpEmailParams): Promise<boolean>
   <div class="container">
     <div class="header">
       <h1>Presence</h1>
-      <p>Staff Attendance & Salary Wallet System</p>
+      <p>Staff Attendance & Salary Ledger System</p>
     </div>
     <div class="content">
       <h2>Verification Code</h2>
@@ -214,7 +214,6 @@ export interface SendUserCreationEmailParams {
   to: string;
   role: string;
   organizationName: string;
-  token: string;
   invitedByName?: string;
   logger?: {
     info: (...args: any[]) => void;

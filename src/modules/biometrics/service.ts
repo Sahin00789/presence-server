@@ -6,7 +6,6 @@ import { AppError } from '../../shared/errors/app-error.js';
 import { writeAuditLog } from '../../shared/services/audit.service.js';
 import {
   FACE_EMBEDDING_SIMILARITY_THRESHOLD,
-  encryptEmbedding,
 } from '../../shared/utils/face.js';
 import { assertLivenessEvidence } from '../../shared/utils/liveness.js';
 import {
@@ -20,9 +19,9 @@ const POSE_CANDIDATES_PER_COLUMN = 5;
 import { resolveStaffProfile } from '../../shared/services/staff.service.js';
 
 interface FaceMatchRow {
-  staff_profile_id: string;
+  employee_id: string;
   user_id: string;
-  staff_code: string;
+  employee_code: string;
   full_name: string;
   pose: string;
   similarity: number | string;
@@ -61,10 +60,6 @@ async function assertPremises(
 
 /**
  * API Route 1: save the five supervised pose vectors for an employee.
- *
- * The legacy single-template row is kept in sync (the centre vector is
- * encrypted) so existing face-status and verification endpoints keep working
- * while clients migrate to the multi-pose flow.
  */
 export async function saveMultiPoseEnrollment(
   fastify: FastifyInstance,
@@ -91,14 +86,31 @@ export async function saveMultiPoseEnrollment(
     1,
     Math.max(0, input.liveness.passiveTextureScore * 0.7 + 0.3)
   );
-  const encryptedCenter = encryptEmbedding(poses.center);
 
-  await fastify.db.transaction(async (tx) => {
-    await tx
-      .insert(multiPoseFaceTemplates)
-      .values({
+  await fastify.db
+    .insert(multiPoseFaceTemplates)
+    .values({
+      organizationId,
+      employeeId: profile.id,
+      centerVector: poses.center,
+      leftVector: poses.left,
+      rightVector: poses.right,
+      upVector: poses.up,
+      downVector: poses.down,
+      modelVersion: input.modelVersion,
+      qualityScore: qualityScore.toFixed(3),
+      livenessScore: livenessScore.toFixed(3),
+      passiveLivenessScore: input.liveness.passiveTextureScore.toFixed(3),
+      enrolledByUserId: actorUserId,
+      enrolledAtPremisesId: input.premisesId ?? null,
+      enrolledAt: now,
+      updatedAt: now,
+      revokedAt: null,
+    })
+    .onConflictDoUpdate({
+      target: multiPoseFaceTemplates.employeeId,
+      set: {
         organizationId,
-        staffProfileId: profile.id,
         centerVector: poses.center,
         leftVector: poses.left,
         rightVector: poses.right,
@@ -113,58 +125,8 @@ export async function saveMultiPoseEnrollment(
         enrolledAt: now,
         updatedAt: now,
         revokedAt: null,
-      })
-      .onConflictDoUpdate({
-        target: multiPoseFaceTemplates.staffProfileId,
-        set: {
-          organizationId,
-          centerVector: poses.center,
-          leftVector: poses.left,
-          rightVector: poses.right,
-          upVector: poses.up,
-          downVector: poses.down,
-          modelVersion: input.modelVersion,
-          qualityScore: qualityScore.toFixed(3),
-          livenessScore: livenessScore.toFixed(3),
-          passiveLivenessScore: input.liveness.passiveTextureScore.toFixed(3),
-          enrolledByUserId: actorUserId,
-          enrolledAtPremisesId: input.premisesId ?? null,
-          enrolledAt: now,
-          updatedAt: now,
-          revokedAt: null,
-        },
-      });
-
-    await tx
-      .insert(schema.faceTemplates)
-      .values({
-        organizationId,
-        staffProfileId: profile.id,
-        embeddingVector: encryptedCenter,
-        modelVersion: input.modelVersion,
-        enrolledByUserId: actorUserId,
-        enrollmentMethod: 'MANAGER_SUPERVISED',
-        enrolledAtPremisesId: input.premisesId ?? null,
-        qualityScore: qualityScore.toFixed(3),
-        enrolledAt: now,
-        revokedAt: null,
-        updatedAt: now,
-      })
-      .onConflictDoUpdate({
-        target: schema.faceTemplates.staffProfileId,
-        set: {
-          embeddingVector: encryptedCenter,
-          modelVersion: input.modelVersion,
-          enrolledByUserId: actorUserId,
-          enrollmentMethod: 'MANAGER_SUPERVISED',
-          enrolledAtPremisesId: input.premisesId ?? null,
-          qualityScore: qualityScore.toFixed(3),
-          enrolledAt: now,
-          revokedAt: null,
-          updatedAt: now,
-        },
-      });
-  });
+      },
+    });
 
   await writeAuditLog(fastify, {
     organizationId,
@@ -189,7 +151,7 @@ export async function saveMultiPoseEnrollment(
     employeeId: profile.id,
     staffProfileId: profile.id,
     userId: profile.userId,
-    staffCode: profile.staffCode,
+    staffCode: profile.employeeCode,
     modelVersion: input.modelVersion,
     poseCount: 5,
     qualityScore,
@@ -222,7 +184,7 @@ export async function matchLiveFaceVector(
       (
         SELECT
           'CENTER'::text AS pose,
-          staff_profile_id,
+          employee_id,
           1 - (center_vector <=> ${vectorLiteral}::vector) AS similarity
         FROM multi_pose_face_templates
         WHERE organization_id = ${organizationId}::uuid
@@ -234,7 +196,7 @@ export async function matchLiveFaceVector(
       (
         SELECT
           'LEFT'::text AS pose,
-          staff_profile_id,
+          employee_id,
           1 - (left_vector <=> ${vectorLiteral}::vector) AS similarity
         FROM multi_pose_face_templates
         WHERE organization_id = ${organizationId}::uuid
@@ -246,7 +208,7 @@ export async function matchLiveFaceVector(
       (
         SELECT
           'RIGHT'::text AS pose,
-          staff_profile_id,
+          employee_id,
           1 - (right_vector <=> ${vectorLiteral}::vector) AS similarity
         FROM multi_pose_face_templates
         WHERE organization_id = ${organizationId}::uuid
@@ -258,7 +220,7 @@ export async function matchLiveFaceVector(
       (
         SELECT
           'UP'::text AS pose,
-          staff_profile_id,
+          employee_id,
           1 - (up_vector <=> ${vectorLiteral}::vector) AS similarity
         FROM multi_pose_face_templates
         WHERE organization_id = ${organizationId}::uuid
@@ -270,7 +232,7 @@ export async function matchLiveFaceVector(
       (
         SELECT
           'DOWN'::text AS pose,
-          staff_profile_id,
+          employee_id,
           1 - (down_vector <=> ${vectorLiteral}::vector) AS similarity
         FROM multi_pose_face_templates
         WHERE organization_id = ${organizationId}::uuid
@@ -280,17 +242,17 @@ export async function matchLiveFaceVector(
       )
     )
     SELECT
-      candidates.staff_profile_id,
+      candidates.employee_id,
       candidates.pose,
       candidates.similarity,
-      staff_profiles.user_id,
-      staff_profiles.staff_code,
+      employees.user_id,
+      employees.employee_code,
       users.full_name
     FROM candidates
-    INNER JOIN staff_profiles
-      ON staff_profiles.id = candidates.staff_profile_id
-      AND staff_profiles.organization_id = ${organizationId}::uuid
-    INNER JOIN users ON users.id = staff_profiles.user_id
+    INNER JOIN employees
+      ON employees.id = candidates.employee_id
+      AND employees.organization_id = ${organizationId}::uuid
+    INNER JOIN users ON users.id = employees.user_id
     ORDER BY candidates.similarity DESC
     LIMIT 1
   `;
@@ -324,8 +286,8 @@ export async function matchLiveFaceVector(
   await writeAuditLog(fastify, {
     organizationId,
     action: 'FACE_MULTI_POSE_CLOCK_IN',
-    resourceType: 'staff_profile',
-    resourceId: best.staff_profile_id,
+    resourceType: 'employee',
+    resourceId: best.employee_id,
     metadata: {
       matchedPose: best.pose,
       similarity: Number(similarity.toFixed(4)),
@@ -339,14 +301,57 @@ export async function matchLiveFaceVector(
   return {
     success: true,
     matched: true,
-    employeeId: best.staff_profile_id,
-    staffProfileId: best.staff_profile_id,
+    employeeId: best.employee_id,
+    staffProfileId: best.employee_id,
     userId: best.user_id,
     staffName: best.full_name,
-    staffCode: best.staff_code,
+    staffCode: best.employee_code,
     matchedPose: best.pose,
     similarity: Number(similarity.toFixed(4)),
     threshold,
     message: 'Face matched against the enrolled multi-pose template.',
+  };
+}
+
+export async function getMultiPoseEnrollmentStatus(
+  fastify: FastifyInstance,
+  organizationId: string,
+  userId: string
+) {
+  const [employee] = await fastify.db
+    .select({ id: schema.employees.id })
+    .from(schema.employees)
+    .where(and(eq(schema.employees.userId, userId), eq(schema.employees.organizationId, organizationId)))
+    .limit(1);
+
+  if (!employee) {
+    return {
+      enrolled: false,
+      employeeId: null,
+    };
+  }
+
+  const [template] = await fastify.db
+    .select({
+      enrolledAt: multiPoseFaceTemplates.enrolledAt,
+      revokedAt: multiPoseFaceTemplates.revokedAt,
+      modelVersion: multiPoseFaceTemplates.modelVersion,
+    })
+    .from(multiPoseFaceTemplates)
+    .where(eq(multiPoseFaceTemplates.employeeId, employee.id))
+    .limit(1);
+
+  if (!template || template.revokedAt) {
+    return {
+      enrolled: false,
+      employeeId: employee.id,
+    };
+  }
+
+  return {
+    enrolled: true,
+    employeeId: employee.id,
+    enrolledAt: template.enrolledAt?.toISOString() ?? null,
+    modelVersion: template.modelVersion ?? null,
   };
 }

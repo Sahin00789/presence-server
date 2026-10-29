@@ -1,2 +1,0 @@
-ALTER TABLE "staff_profiles" ADD COLUMN "premises_id" uuid;--> statement-breakpoint
-ALTER TABLE "staff_profiles" ADD CONSTRAINT "staff_profiles_premises_id_premises_id_fk" FOREIGN KEY ("premises_id") REFERENCES "public"."premises"("id") ON DELETE set null ON UPDATE no action;

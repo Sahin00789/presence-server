@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import {
   evaluateGeofence,
@@ -14,6 +14,8 @@ import {
   listOwnerUserIds,
   resolveNotificationTargets,
 } from '../../shared/services/staff.service.js';
+import { toDateISOInTimeZone } from '../../shared/utils/datetime.js';
+import { resolveTimezone } from '../shifts/service.js';
 import {
   GpsPingSummary,
   LocationStaffCard,
@@ -22,15 +24,55 @@ import {
 
 const MAX_ACCURACY = 30;
 const MAX_AGE_MINUTES = 2;
+const FAILURE_RESULTS = new Set([
+  'OUTSIDE',
+  'STALE',
+  'LOW_ACCURACY',
+  'MOCKED',
+  'UNKNOWN',
+]);
 
-function isStale(timestamp: Date | null | undefined): boolean {
-  if (!timestamp) {
-    return true;
-  }
-  const diffMs = Date.now() - timestamp.getTime();
-  return diffMs > MAX_AGE_MINUTES * 60 * 1000;
+function isStale(timestamp: Date, now: Date): boolean {
+  return now.getTime() - timestamp.getTime() > MAX_AGE_MINUTES * 60 * 1000;
 }
 
+/**
+ * The GPS exception is advisory and is raised once more than three outside
+ * readings have accumulated for the active attendance session.
+ */
+export function shouldRaiseOutsideAlert(
+  outsidePingCount: number,
+  monitoringAlertAt: Date | null | undefined
+): boolean {
+  return outsidePingCount > 3 && monitoringAlertAt == null;
+}
+
+function mapPingStatus(
+  result: (typeof schema.locationCheckResultEnum.enumValues)[number]
+): GpsPingSummary['status'] {
+  switch (result) {
+    case 'IN_PREMISES':
+      return 'Inside';
+    case 'OUTSIDE':
+      return 'Outside';
+    case 'LOW_ACCURACY':
+      return 'Uncertain';
+    case 'STALE':
+      return 'Stale';
+    case 'MOCKED':
+      return 'Mocked';
+    default:
+      return 'No location';
+  }
+}
+
+/**
+ * Persists a periodic active-shift GPS ping and atomically updates the
+ * denormalised counters on `employee_attendance`.
+ *
+ * Three consecutive failures only raise an alert/exception; the employee is
+ * never automatically marked absent.
+ */
 export async function submitLocationCheck(
   fastify: FastifyInstance,
   userId: string,
@@ -42,179 +84,267 @@ export async function submitLocationCheck(
     accuracyMeters: number;
     isMock?: boolean;
     timestamp?: string;
+    clientRequestId?: string;
   }
-): Promise<{ result: string; consecutiveFailures: number; exceptionCreated: boolean }> {
-  const { attendanceEventId, latitude, longitude, accuracyMeters, isMock, timestamp } = body;
+): Promise<{
+  result: string;
+  consecutiveFailures: number;
+  exceptionCreated: boolean;
+}> {
+  const {
+    attendanceEventId,
+    latitude,
+    longitude,
+    accuracyMeters,
+    isMock,
+    timestamp,
+    clientRequestId,
+  } = body;
 
   const [event] = await fastify.db
     .select()
-    .from(schema.attendanceEvents)
-    .where(eq(schema.attendanceEvents.id, attendanceEventId))
+    .from(schema.employeeAttendance)
+    .where(
+      and(
+        eq(schema.employeeAttendance.id, attendanceEventId),
+        eq(schema.employeeAttendance.organizationId, organizationId)
+      )
+    )
     .limit(1);
 
   if (!event) {
-    throw new AppError('Attendance event not found', 404, 'ATTENDANCE_EVENT_NOT_FOUND');
+    throw new AppError(
+      'Attendance event not found',
+      404,
+      'ATTENDANCE_EVENT_NOT_FOUND'
+    );
   }
 
-  const [profile] = await fastify.db
-    .select()
-    .from(schema.staffProfiles)
-    .where(eq(schema.staffProfiles.id, event.staffProfileId))
-    .limit(1);
-
-  if (!profile || profile.organizationId !== organizationId) {
+  const profile = await findStaffProfile(fastify, userId, organizationId);
+  if (!profile || profile.id !== event.employeeId) {
     throw new AppError('Forbidden', 403, 'FORBIDDEN');
   }
 
-  const premisesList = await fastify.db
+  if (!event.clockInAt) {
+    throw new AppError(
+      'Location monitoring can only start after clock-in.',
+      409,
+      'ATTENDANCE_NOT_CLOCKED_IN'
+    );
+  }
+
+  if (event.clockOutAt) {
+    throw new AppError(
+      'Location monitoring has stopped for this attendance.',
+      409,
+      'ATTENDANCE_ALREADY_CLOSED'
+    );
+  }
+
+  if (clientRequestId) {
+    const [existingPing] = await fastify.db
+      .select()
+      .from(schema.attendanceLocationPings)
+      .where(
+        and(
+          eq(schema.attendanceLocationPings.attendanceId, attendanceEventId),
+          eq(schema.attendanceLocationPings.clientRequestId, clientRequestId)
+        )
+      )
+      .limit(1);
+
+    if (existingPing) {
+      return {
+        result: existingPing.result,
+        consecutiveFailures: event.consecutivePingFailures,
+        exceptionCreated: false,
+      };
+    }
+  }
+
+  const [premises] = await fastify.db
     .select()
     .from(schema.premises)
     .where(
       and(
-        eq(schema.premises.organizationId, organizationId),
-        eq(schema.premises.isActive, true)
+        eq(schema.premises.id, event.premisesId),
+        eq(schema.premises.organizationId, organizationId)
       )
-    );
+    )
+    .limit(1);
 
-  let result: (typeof schema.locationCheckResultEnum.enumValues)[number] = 'UNKNOWN';
+  // The server's receive time is authoritative for freshness. A client-provided
+  // capture time can only make a ping older (e.g. drained from the offline
+  // outbox), never fresher.
+  const checkedAt = new Date();
+  const capturedAt = timestamp ? new Date(timestamp) : checkedAt;
+  const effectiveCapturedAt =
+    Number.isNaN(capturedAt.getTime()) || capturedAt > checkedAt
+      ? checkedAt
+      : capturedAt;
+  let result: (typeof schema.locationCheckResultEnum.enumValues)[number] =
+    'UNKNOWN';
 
   if (isMock) {
     result = 'MOCKED';
   } else if (accuracyMeters > MAX_ACCURACY) {
     result = 'LOW_ACCURACY';
-  } else if (isStale(timestamp ? new Date(timestamp) : new Date())) {
+  } else if (isStale(effectiveCapturedAt, checkedAt)) {
     result = 'STALE';
-  } else if (premisesList.length === 0) {
-    result = 'UNKNOWN';
-  } else {
-    const premises = premisesList.find((p) => p.id === event.premisesId) ?? premisesList[0];
-    const evalResult = evaluateGeofence(
+  } else if (premises) {
+    const evaluation = evaluateGeofence(
       {
         latitude,
         longitude,
         accuracyMeters,
         isMocked: false,
-        capturedAt: timestamp ? new Date(timestamp) : new Date(),
+        capturedAt: checkedAt,
       },
       {
         latitude: Number(premises.latitude),
         longitude: Number(premises.longitude),
         radiusMeters: Number(
-          (premises as any).radiusMeters ??
-            (premises as any).geofenceRadiusMeters ??
-            DEFAULT_GEOFENCE_RADIUS_METERS
+          premises.radiusMeters ?? DEFAULT_GEOFENCE_RADIUS_METERS
         ),
       }
     );
-    if (evalResult.result === 'IN_PREMISES') {
-      result = 'IN_PREMISES';
-    } else if (evalResult.result === 'LOW_ACCURACY') {
-      result = 'LOW_ACCURACY';
-    } else if (evalResult.result === 'OUTSIDE') {
-      result = 'OUTSIDE';
-    } else if (evalResult.result === 'MOCKED') {
-      result = 'MOCKED';
-    } else if (evalResult.result === 'STALE') {
-      result = 'STALE';
-    } else {
-      result = 'UNKNOWN';
+    result =
+      evaluation.result === 'IN_PREMISES'
+        ? 'IN_PREMISES'
+        : evaluation.result === 'OUTSIDE'
+          ? 'OUTSIDE'
+          : evaluation.result === 'LOW_ACCURACY'
+            ? 'LOW_ACCURACY'
+            : evaluation.result === 'MOCKED'
+              ? 'MOCKED'
+              : evaluation.result === 'STALE'
+                ? 'STALE'
+                : 'UNKNOWN';
+  }
+
+  try {
+    await fastify.db.insert(schema.attendanceLocationPings).values({
+      attendanceId: attendanceEventId,
+      checkedAt,
+      latitude: latitude.toFixed(7),
+      longitude: longitude.toFixed(7),
+      accuracyMeters: accuracyMeters.toFixed(2),
+      result,
+      clientRequestId: clientRequestId ?? null,
+    });
+  } catch (error) {
+    if (clientRequestId && (error as { code?: string })?.code === '23505') {
+      // Still enforce retention of only last 3 pings even on duplicate
+      const recentPings = await fastify.db
+        .select({ id: schema.attendanceLocationPings.id })
+        .from(schema.attendanceLocationPings)
+        .where(eq(schema.attendanceLocationPings.attendanceId, attendanceEventId))
+        .orderBy(desc(schema.attendanceLocationPings.checkedAt), desc(schema.attendanceLocationPings.createdAt))
+        .limit(10);
+
+      if (recentPings.length > 3) {
+        const idsToDelete = recentPings.slice(3).map((p) => p.id);
+        if (idsToDelete.length > 0) {
+          await fastify.db
+            .delete(schema.attendanceLocationPings)
+            .where(inArray(schema.attendanceLocationPings.id, idsToDelete));
+        }
+      }
+      return {
+        result,
+        consecutiveFailures: event.consecutivePingFailures,
+        exceptionCreated: false,
+      };
+    }
+    throw error;
+  }
+
+  // Keep only the last 3 location pings per attendance for lightweight storage
+  const recentPings = await fastify.db
+    .select({ id: schema.attendanceLocationPings.id })
+    .from(schema.attendanceLocationPings)
+    .where(eq(schema.attendanceLocationPings.attendanceId, attendanceEventId))
+    .orderBy(desc(schema.attendanceLocationPings.checkedAt), desc(schema.attendanceLocationPings.createdAt))
+    .limit(10);
+
+  if (recentPings.length > 3) {
+    const idsToDelete = recentPings.slice(3).map((p) => p.id);
+    if (idsToDelete.length > 0) {
+      await fastify.db
+        .delete(schema.attendanceLocationPings)
+        .where(inArray(schema.attendanceLocationPings.id, idsToDelete));
     }
   }
 
-  let [session] = await fastify.db
-    .select()
-    .from(schema.locationMonitoringSessions)
-    .where(
-      and(
-        eq(schema.locationMonitoringSessions.attendanceEventId, attendanceEventId),
-        eq(schema.locationMonitoringSessions.isActive, true)
-      )
-    )
-    .limit(1);
+  const inside = result === 'IN_PREMISES';
+  const failure = FAILURE_RESULTS.has(result);
 
-  if (!session) {
-    const [created] = await fastify.db
-      .insert(schema.locationMonitoringSessions)
-      .values({
-        attendanceEventId,
-        staffProfileId: event.staffProfileId,
-        isActive: true,
-        consecutiveFailures: 0,
-      })
-      .returning();
-    session = created;
-  }
+  const [updated] = await fastify.db
+    .update(schema.employeeAttendance)
+    .set({
+      insidePingCount: inside
+        ? sql`${schema.employeeAttendance.insidePingCount} + 1`
+        : schema.employeeAttendance.insidePingCount,
+      outsidePingCount: !inside
+        ? sql`${schema.employeeAttendance.outsidePingCount} + 1`
+        : schema.employeeAttendance.outsidePingCount,
+      consecutivePingFailures: failure
+        ? sql`${schema.employeeAttendance.consecutivePingFailures} + 1`
+        : inside
+          ? 0
+          : schema.employeeAttendance.consecutivePingFailures,
+      lastPingAt: checkedAt,
+      lastPingResult: result,
+      lastSuccessfulPingAt: inside
+        ? checkedAt
+        : schema.employeeAttendance.lastSuccessfulPingAt,
+      monitoringAlertAt: inside
+        ? null
+        : schema.employeeAttendance.monitoringAlertAt,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.employeeAttendance.id, attendanceEventId))
+    .returning();
 
-  await fastify.db.insert(schema.locationCheckEvents).values({
-    sessionId: session.id,
-    latitude: String(latitude),
-    longitude: String(longitude),
-    accuracyMeters: String(accuracyMeters),
-    result,
-  });
+  const consecutiveFailures = updated.consecutivePingFailures;
+  const outsidePingCount = updated.outsidePingCount;
+  // The monitoring exception is raised once more than three outside readings
+  // have accumulated for this shift. It is advisory only: attendance is never
+  // automatically marked absent.
+  const exceptionCreated =
+    shouldRaiseOutsideAlert(outsidePingCount, updated.monitoringAlertAt);
 
-  let consecutiveFailures = session.consecutiveFailures ?? 0;
-  let exceptionCreated = false;
-
-  if (result === 'IN_PREMISES') {
-    consecutiveFailures = 0;
+  if (exceptionCreated) {
     await fastify.db
-      .update(schema.locationMonitoringSessions)
-      .set({ consecutiveFailures: 0 })
-      .where(eq(schema.locationMonitoringSessions.id, session.id));
-  } else if (
-    result === 'MOCKED' ||
-    result === 'OUTSIDE' ||
-    result === 'STALE' ||
-    result === 'LOW_ACCURACY'
-  ) {
-    consecutiveFailures = (session.consecutiveFailures ?? 0) + 1;
-    await fastify.db
-      .update(schema.locationMonitoringSessions)
-      .set({ consecutiveFailures })
-      .where(eq(schema.locationMonitoringSessions.id, session.id));
+      .update(schema.employeeAttendance)
+      .set({ monitoringAlertAt: new Date() })
+      .where(eq(schema.employeeAttendance.id, attendanceEventId));
 
-    if (consecutiveFailures >= 3) {
-      const existing = await fastify.db
-        .select()
-        .from(schema.attendanceExceptions)
-        .where(
-          and(
-            eq(schema.attendanceExceptions.attendanceEventId, attendanceEventId),
-            eq(schema.attendanceExceptions.reason, 'THREE_GPS_FAILURES'),
-            eq(schema.attendanceExceptions.status, 'OPEN')
-          )
-        )
-        .limit(1);
+    const targets = await resolveNotificationTargets(
+      fastify,
+      organizationId,
+      event.employeeId,
+      true,
+      event.premisesId
+    );
+    const ownerIds = await listOwnerUserIds(fastify, organizationId);
+    const allTargets = Array.from(new Set([...ownerIds, ...targets]));
 
-      if (existing.length === 0) {
-        await fastify.db.insert(schema.attendanceExceptions).values({
+    for (const targetUserId of allTargets) {
+      await createNotification(fastify, {
+        organizationId,
+        userId: targetUserId,
+        type: 'GPS_FAILURE_ALERT',
+        title: 'Location monitoring exception',
+        body: 'More than three outside GPS/location readings have been recorded during this active shift. Owner/Manager review is required; attendance is not automatically marked absent.',
+        dedupeKey: `gps-outside:${attendanceEventId}:${outsidePingCount}`,
+        metadata: {
           attendanceEventId,
-          reason: 'THREE_GPS_FAILURES',
-          status: 'OPEN',
-        });
-        exceptionCreated = true;
-
-        const targets = await resolveNotificationTargets(
-          fastify,
-          organizationId,
-          event.staffProfileId
-        );
-        const ownerIds = await listOwnerUserIds(fastify, organizationId);
-        const allTargets = Array.from(new Set([...targets, ...ownerIds]));
-
-        for (const targetUserId of allTargets) {
-          await createNotification(fastify, {
-            organizationId,
-            userId: targetUserId,
-            type: 'GPS_FAILURE_ALERT',
-            title: 'Location monitoring exception',
-            body: 'Three consecutive GPS/location check failures detected during an active shift. This requires manager review.',
-            dedupeKey: `gps-fail:${attendanceEventId}:${consecutiveFailures}`,
-            metadata: { attendanceEventId, staffProfileId: event.staffProfileId, consecutiveFailures },
-          });
-        }
-      }
+          staffProfileId: event.employeeId,
+          consecutiveFailures,
+          outsidePingCount,
+        },
+      });
     }
   }
 
@@ -222,9 +352,9 @@ export async function submitLocationCheck(
     await fastify.publishDomainEvent({
       type: 'location_check_updated',
       organizationId,
-      userIds: [],
+      userIds: profile.userId ? [profile.userId] : [],
       payload: {
-        staffProfileId: event.staffProfileId,
+        staffProfileId: event.employeeId,
         attendanceEventId,
         result,
         consecutiveFailures,
@@ -232,38 +362,53 @@ export async function submitLocationCheck(
     });
   }
 
-  return { result: result as string, consecutiveFailures, exceptionCreated };
+  return {
+    result,
+    consecutiveFailures,
+    exceptionCreated,
+  };
 }
 
 export async function getActiveLocationSession(
   fastify: FastifyInstance,
   userId: string,
   organizationId: string
-): Promise<{ attendanceEventId: string | null; isActive: boolean; consecutiveFailures: number }> {
+): Promise<{
+  attendanceEventId: string | null;
+  isActive: boolean;
+  consecutiveFailures: number;
+}> {
   const profile = await findStaffProfile(fastify, userId, organizationId);
   if (!profile) {
     return { attendanceEventId: null, isActive: false, consecutiveFailures: 0 };
   }
 
-  const [session] = await fastify.db
-    .select()
-    .from(schema.locationMonitoringSessions)
+  const [event] = await fastify.db
+    .select({
+      id: schema.employeeAttendance.id,
+      consecutivePingFailures: schema.employeeAttendance.consecutivePingFailures,
+    })
+    .from(schema.employeeAttendance)
     .where(
       and(
-        eq(schema.locationMonitoringSessions.staffProfileId, profile.id),
-        eq(schema.locationMonitoringSessions.isActive, true)
+        eq(schema.employeeAttendance.organizationId, organizationId),
+        eq(schema.employeeAttendance.employeeId, profile.id),
+        isNull(schema.employeeAttendance.clockOutAt),
+        sql`${schema.employeeAttendance.clockInAt} IS NOT NULL`,
+        sql`${schema.employeeAttendance.status} NOT IN ('SCHEDULED', 'ABSENT', 'LEAVE', 'HOLIDAY', 'WEEKLY_OFF')`
       )
     )
+    .orderBy(desc(schema.employeeAttendance.clockInAt))
     .limit(1);
 
-  if (!session) {
+  if (!event) {
     return { attendanceEventId: null, isActive: false, consecutiveFailures: 0 };
   }
 
   return {
-    attendanceEventId: session.attendanceEventId ?? null,
+    attendanceEventId: event.id,
     isActive: true,
-    consecutiveFailures: session.consecutiveFailures ?? 0,
+    consecutiveFailures: event.consecutivePingFailures,
   };
 }
 
@@ -274,10 +419,19 @@ export async function getTodayLocationPresence(
   premisesIdParam?: string,
   dateParam?: string
 ): Promise<LocationTodayPresenceResponse> {
-  const targetDate = dateParam ?? new Date().toISOString().slice(0, 10);
-  const dateObj = new Date(targetDate);
-  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const dayOfWeekStr = dayNames[dateObj.getDay()] ?? 'Monday';
+  const timezone = await resolveTimezone(fastify, organizationId);
+  const targetDate = dateParam ?? toDateISOInTimeZone(new Date(), timezone);
+  const dateObj = new Date(`${targetDate}T00:00:00Z`);
+  const dayNames = [
+    'Sunday',
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+  ];
+  const dayOfWeekStr = dayNames[dateObj.getUTCDay()] ?? 'Monday';
 
   const allPremises = await fastify.db
     .select()
@@ -293,6 +447,7 @@ export async function getTodayLocationPresence(
     return {
       premisesId: null,
       premisesName: null,
+      address: null,
       latitude: null,
       longitude: null,
       radiusMeters: null,
@@ -305,76 +460,75 @@ export async function getTodayLocationPresence(
 
   if (premisesIdParam) {
     const found = allPremises.find((p) => p.id === premisesIdParam);
-    if (found) {
-      targetPremises = found;
-    }
+    if (found) targetPremises = found;
   } else if (user.role === 'MANAGER') {
     const [managerProfile] = await fastify.db
-      .select({ premisesId: schema.staffProfiles.premisesId })
-      .from(schema.staffProfiles)
+      .select({ premisesId: schema.employees.premisesId })
+      .from(schema.employees)
       .where(
         and(
-          eq(schema.staffProfiles.organizationId, organizationId),
-          eq(schema.staffProfiles.userId, user.userId)
+          eq(schema.employees.organizationId, organizationId),
+          eq(schema.employees.userId, user.userId),
+          eq(schema.employees.isActive, true)
         )
       )
       .limit(1);
 
     if (managerProfile?.premisesId) {
       const found = allPremises.find((p) => p.id === managerProfile.premisesId);
-      if (found) {
-        targetPremises = found;
-      }
+      if (found) targetPremises = found;
     }
   }
 
   const staffRows = await fastify.db
     .select({
-      id: schema.staffProfiles.id,
-      userId: schema.staffProfiles.userId,
-      role: schema.memberships.role,
-      staffCode: schema.staffProfiles.staffCode,
+      id: schema.employees.id,
+      userId: schema.employees.userId,
+      role: schema.employees.role,
+      staffCode: schema.employees.employeeCode,
       fullName: schema.users.fullName,
       avatarUrl: schema.users.avatarUrl,
-      premisesId: schema.staffProfiles.premisesId,
+      premisesId: schema.employees.premisesId,
     })
-    .from(schema.staffProfiles)
-    .innerJoin(schema.users, eq(schema.users.id, schema.staffProfiles.userId))
-    .leftJoin(
-      schema.memberships,
-      and(
-        eq(schema.memberships.userId, schema.staffProfiles.userId),
-        eq(schema.memberships.organizationId, organizationId)
-      )
-    )
+    .from(schema.employees)
+    .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
     .where(
       and(
-        eq(schema.staffProfiles.organizationId, organizationId),
+        eq(schema.employees.organizationId, organizationId),
+        eq(schema.employees.isActive, true),
         eq(schema.users.isActive, true)
       )
     );
 
   const filteredStaff = staffRows.filter(
-    (s) => s.premisesId === targetPremises.id || (!s.premisesId && targetPremises.id === allPremises[0].id)
-  );
+    (staff) => staff.premisesId === targetPremises.id && staff.userId !== null
+  ) as Array<(typeof staffRows)[number] & { userId: string }>;
 
   const staffCards: LocationStaffCard[] = [];
 
-  for (const s of filteredStaff) {
-    const [attendanceEvent] = await fastify.db
+  for (const staff of filteredStaff) {
+    const attendanceRows = await fastify.db
       .select()
-      .from(schema.attendanceEvents)
+      .from(schema.employeeAttendance)
       .where(
         and(
-          eq(schema.attendanceEvents.staffProfileId, s.id),
-          eq(schema.attendanceEvents.workDate, targetDate)
+          eq(schema.employeeAttendance.organizationId, organizationId),
+          eq(schema.employeeAttendance.employeeId, staff.id),
+          eq(schema.employeeAttendance.workDate, targetDate)
         )
       )
-      .limit(1);
+      .orderBy(desc(schema.employeeAttendance.createdAt));
+
+    const shiftEvent =
+      attendanceRows.find((row) => row.attendanceType === 'SHIFT') ??
+      attendanceRows[0] ??
+      null;
+    const overtimeEvent =
+      attendanceRows.find((row) => row.attendanceType === 'OVERTIME') ?? null;
 
     let shiftStart: string | null = null;
     let shiftEnd: string | null = null;
-    let shiftName = 'Assigned Shift';
+    let shiftName = 'No shift assigned';
 
     const [assignment] = await fastify.db
       .select({
@@ -387,54 +541,19 @@ export async function getTodayLocationPresence(
         schema.shifts,
         eq(schema.shifts.id, schema.employeeShiftAssignments.shiftId)
       )
-      .where(eq(schema.employeeShiftAssignments.staffId, s.id))
+      .where(
+        and(
+          eq(schema.employeeShiftAssignments.employeeId, staff.id),
+          eq(schema.employeeShiftAssignments.organizationId, organizationId),
+          eq(schema.employeeShiftAssignments.isActive, true)
+        )
+      )
       .limit(1);
 
     if (assignment) {
       shiftName = assignment.shiftName;
       shiftStart = String(assignment.startTime);
       shiftEnd = String(assignment.endTime);
-    } else {
-      const [premTemplate] = await fastify.db
-        .select({
-          shiftName: schema.shifts.shiftName,
-          startTime: schema.shifts.startTime,
-          endTime: schema.shifts.endTime,
-        })
-        .from(schema.shifts)
-        .where(
-          and(
-            eq(schema.shifts.organisationId, organizationId),
-            eq(schema.shifts.premisesId, targetPremises.id)
-          )
-        )
-        .limit(1);
-
-      if (premTemplate) {
-        shiftName = premTemplate.shiftName;
-        shiftStart = String(premTemplate.startTime);
-        shiftEnd = String(premTemplate.endTime);
-      } else {
-        const [orgTemplate] = await fastify.db
-          .select({
-            shiftName: schema.shifts.shiftName,
-            startTime: schema.shifts.startTime,
-            endTime: schema.shifts.endTime,
-          })
-          .from(schema.shifts)
-          .where(eq(schema.shifts.organisationId, organizationId))
-          .limit(1);
-
-        if (orgTemplate) {
-          shiftName = orgTemplate.shiftName;
-          shiftStart = String(orgTemplate.startTime);
-          shiftEnd = String(orgTemplate.endTime);
-        } else {
-          shiftName = 'General Shift';
-          shiftStart = '09:00:00';
-          shiftEnd = '17:00:00';
-        }
-      }
     }
 
     const [overtimeRecord] = await fastify.db
@@ -442,172 +561,147 @@ export async function getTodayLocationPresence(
       .from(schema.overtime)
       .where(
         and(
-          eq(schema.overtime.staffProfileId, s.id),
+          eq(schema.overtime.organizationId, organizationId),
+          eq(schema.overtime.employeeId, staff.id),
           eq(schema.overtime.workDate, targetDate)
         )
       )
       .limit(1);
 
-    const otName = overtimeRecord?.reason || (overtimeRecord ? 'Overtime Shift' : null);
-    const otStart = overtimeRecord?.startTime ? String(overtimeRecord.startTime) : null;
-    const otEnd = overtimeRecord?.endTime ? String(overtimeRecord.endTime) : null;
-
-    let sessions: typeof schema.locationMonitoringSessions.$inferSelect[] = [];
-    if (attendanceEvent) {
-      sessions = await fastify.db
-        .select()
-        .from(schema.locationMonitoringSessions)
-        .where(eq(schema.locationMonitoringSessions.attendanceEventId, attendanceEvent.id));
-    }
-
-    const activeSession = sessions.find((sess) => sess.isActive) ?? sessions[0];
-    const consecutiveFailures = activeSession?.consecutiveFailures ?? 0;
-
-    let openExceptionId: string | null = null;
-    if (attendanceEvent) {
-      const [exc] = await fastify.db
-        .select({ id: schema.attendanceExceptions.id })
-        .from(schema.attendanceExceptions)
-        .where(
-          and(
-            eq(schema.attendanceExceptions.attendanceEventId, attendanceEvent.id),
-            eq(schema.attendanceExceptions.status, 'OPEN')
+    const pings = shiftEvent
+      ? await fastify.db
+          .select()
+          .from(schema.attendanceLocationPings)
+          .where(
+            eq(schema.attendanceLocationPings.attendanceId, shiftEvent.id)
           )
-        )
-        .limit(1);
-      if (exc) {
-        openExceptionId = exc.id;
-      }
-    }
+          .orderBy(desc(schema.attendanceLocationPings.checkedAt))
+      : [];
 
-    const sessionIds = sessions.map((sess) => sess.id);
-
-    let checkEvents: typeof schema.locationCheckEvents.$inferSelect[] = [];
-    if (sessionIds.length > 0) {
-      checkEvents = await fastify.db
-        .select()
-        .from(schema.locationCheckEvents)
-        .where(inArray(schema.locationCheckEvents.sessionId, sessionIds))
-        .orderBy(desc(schema.locationCheckEvents.checkTime));
-    }
-
-    let insideCount = 0;
-    let outsideCount = 0;
-
-    for (const check of checkEvents) {
-      if (check.result === 'IN_PREMISES') {
-        insideCount++;
-      } else if (check.result === 'OUTSIDE' || check.result === 'MOCKED') {
-        outsideCount++;
-      }
-    }
+    const openExceptionId =
+      shiftEvent &&
+      shiftEvent.correctedAt == null &&
+      (shiftEvent.monitoringAlertAt != null || shiftEvent.outsidePingCount > 3)
+        ? shiftEvent.id
+        : null;
 
     let missedCount = 0;
-    if (attendanceEvent?.clockIn) {
-      const clockInMs = new Date(attendanceEvent.clockIn).getTime();
-      const endTimeMs = attendanceEvent.clockOut
-        ? new Date(attendanceEvent.clockOut).getTime()
+    if (shiftEvent?.clockInAt) {
+      const clockInMs = new Date(shiftEvent.clockInAt).getTime();
+      const endMs = shiftEvent.clockOutAt
+        ? new Date(shiftEvent.clockOutAt).getTime()
         : Date.now();
-      const elapsedMinutes = Math.max(0, (endTimeMs - clockInMs) / 60_000);
-      const expectedIntervals = Math.floor(elapsedMinutes / 10);
-      const totalPings = checkEvents.length;
-      missedCount = Math.max(0, expectedIntervals - totalPings);
-    }
-
-    let locationStatus: 'Inside' | 'Outside' | 'GPS Uncertain' | 'GPS Unavailable' =
-      'GPS Unavailable';
-    const latestCheck = checkEvents[0];
-    if (latestCheck) {
-      if (latestCheck.result === 'IN_PREMISES') {
-        locationStatus = 'Inside';
-      } else if (latestCheck.result === 'OUTSIDE' || latestCheck.result === 'MOCKED') {
-        locationStatus = 'Outside';
-      } else if (latestCheck.result === 'LOW_ACCURACY') {
-        locationStatus = 'GPS Uncertain';
-      } else {
-        locationStatus = 'GPS Unavailable';
+      const expectedIntervals = Math.floor(
+        Math.max(0, endMs - clockInMs) / (10 * 60_000)
+      );
+      // Missed count = expected intervals not yet submitted (accounting for last 3 stored)
+      missedCount = Math.max(0, expectedIntervals - pings.length);
+      if (missedCount > 0 && pings.length === 0) {
+        missedCount = expectedIntervals;
       }
     }
 
-    const latestPings: GpsPingSummary[] = checkEvents.slice(0, 3).map((chk) => {
-      const lat = Number(chk.latitude);
-      const lng = Number(chk.longitude);
-      const targetLat = Number(targetPremises.latitude);
-      const targetLng = Number(targetPremises.longitude);
+    let locationStatus:
+      | 'Inside'
+      | 'Outside'
+      | 'GPS Uncertain'
+      | 'GPS Unavailable' = 'GPS Unavailable';
 
-      const dist = haversineDistanceMeters(lat, lng, targetLat, targetLng);
-      const roundedDist = Number.isFinite(dist) ? roundDistanceMeters(dist) : null;
+    if (shiftEvent?.lastPingResult === 'IN_PREMISES') {
+      locationStatus = 'Inside';
+    } else if (
+      shiftEvent?.lastPingResult === 'OUTSIDE' ||
+      shiftEvent?.lastPingResult === 'MOCKED'
+    ) {
+      locationStatus = 'Outside';
+    } else if (shiftEvent?.lastPingResult === 'LOW_ACCURACY') {
+      locationStatus = 'GPS Uncertain';
+    }
 
-      let pStatus: 'Inside' | 'Outside' | 'Uncertain' | 'Stale' | 'Mocked' | 'No location' =
-        'No location';
-      if (chk.result === 'IN_PREMISES') pStatus = 'Inside';
-      else if (chk.result === 'OUTSIDE') pStatus = 'Outside';
-      else if (chk.result === 'LOW_ACCURACY') pStatus = 'Uncertain';
-      else if (chk.result === 'STALE') pStatus = 'Stale';
-      else if (chk.result === 'MOCKED') pStatus = 'Mocked';
+    const latestPings: GpsPingSummary[] = pings.slice(0, 3).map((ping) => {
+      const lat = Number(ping.latitude);
+      const lng = Number(ping.longitude);
+      const distance = haversineDistanceMeters(
+        lat,
+        lng,
+        Number(targetPremises.latitude),
+        Number(targetPremises.longitude)
+      );
 
       return {
-        id: chk.id,
-        checkTime: chk.checkTime.toISOString(),
-        distanceMeters: roundedDist,
-        accuracyMeters: Number(chk.accuracyMeters),
-        status: pStatus,
+        id: ping.id,
+        checkTime: ping.checkedAt.toISOString(),
+        distanceMeters: Number.isFinite(distance)
+          ? roundDistanceMeters(distance)
+          : null,
+        accuracyMeters:
+          ping.accuracyMeters == null ? null : Number(ping.accuracyMeters),
+        status: mapPingStatus(ping.result),
       };
     });
 
-    const attStatus = attendanceEvent
-      ? attendanceEvent.status
-      : (assignment || shiftStart ? 'SCHEDULED' : 'NOT_RECORDED');
-    const clockInStr = attendanceEvent?.clockIn
-      ? new Date(attendanceEvent.clockIn).toISOString()
+    const attendanceStatus = shiftEvent
+      ? shiftEvent.status
+      : assignment
+        ? 'SCHEDULED'
+        : 'NOT_RECORDED';
+
+    const clockIn = shiftEvent?.clockInAt
+      ? new Date(shiftEvent.clockInAt).toISOString()
       : null;
-    const clockOutStr = attendanceEvent?.clockOut
-      ? new Date(attendanceEvent.clockOut).toISOString()
+    const clockOut = shiftEvent?.clockOutAt
+      ? new Date(shiftEvent.clockOutAt).toISOString()
       : null;
 
-    const otClockIn = (attendanceEvent?.overtimeId && attendanceEvent.overtimeId === overtimeRecord?.id && attendanceEvent.clockIn)
-      ? new Date(attendanceEvent.clockIn).toISOString()
-      : (overtimeRecord?.resolvedAt ? new Date(overtimeRecord.resolvedAt).toISOString() : null);
-    const otClockOut = (attendanceEvent?.overtimeId && attendanceEvent.overtimeId === overtimeRecord?.id && attendanceEvent.clockOut)
-      ? new Date(attendanceEvent.clockOut).toISOString()
-      : null;
-
-    let shiftStatus = 'NOT_SCHEDULED';
-    if (attendanceEvent) {
-      shiftStatus = attendanceEvent.status;
-    } else if (assignment || shiftStart) {
-      shiftStatus = 'SCHEDULED';
-    }
+    const overtimeClockIn =
+      overtimeEvent?.clockInAt
+        ? new Date(overtimeEvent.clockInAt).toISOString()
+        : null;
+    const overtimeClockOut =
+      overtimeEvent?.clockOutAt
+        ? new Date(overtimeEvent.clockOutAt).toISOString()
+        : null;
 
     staffCards.push({
-      staffProfileId: s.id,
-      userId: s.userId,
-      fullName: s.fullName,
-      role: s.role ?? 'STAFF',
-      staffCode: s.staffCode,
-      avatarUrl: s.avatarUrl,
-      premisesId: s.premisesId,
+      staffProfileId: staff.id,
+      userId: staff.userId,
+      fullName: staff.fullName,
+      role: staff.role ?? 'STAFF',
+      staffCode: staff.staffCode,
+      avatarUrl: staff.avatarUrl,
+      premisesId: staff.premisesId,
       premisesName: targetPremises.name,
-      attendanceStatus: attStatus,
+      attendanceStatus,
       locationStatus,
       dayOfWeek: dayOfWeekStr,
       shiftName,
-      overtimeName: otName,
+      overtimeName:
+        overtimeRecord?.reason ||
+        (overtimeRecord ? 'Overtime Shift' : null),
       regularShiftStartTime: shiftStart,
       regularShiftEndTime: shiftEnd,
-      overtimeStartTime: otStart,
-      overtimeEndTime: otEnd,
-      clockInTime: clockInStr,
-      clockOutTime: clockOutStr,
-      overtimeClockInTime: otClockIn,
-      overtimeClockOutTime: otClockOut,
-      shiftStatus,
-      hasOvertimeToday: !!overtimeRecord,
-      consecutiveFailures,
+      overtimeStartTime: overtimeRecord?.startTime
+        ? String(overtimeRecord.startTime)
+        : null,
+      overtimeEndTime: overtimeRecord?.endTime
+        ? String(overtimeRecord.endTime)
+        : null,
+      clockInTime: clockIn,
+      clockOutTime: clockOut,
+      overtimeClockInTime: overtimeClockIn,
+      overtimeClockOutTime: overtimeClockOut,
+      shiftStatus: shiftEvent
+        ? shiftEvent.status
+        : assignment
+          ? 'SCHEDULED'
+          : 'NOT_SCHEDULED',
+      hasOvertimeToday: Boolean(overtimeRecord),
+      overtimeId: overtimeRecord?.id ?? null,
+      consecutiveFailures: shiftEvent?.consecutivePingFailures ?? 0,
       exceptionId: openExceptionId,
       counts: {
-        inside: insideCount,
-        outside: outsideCount,
+        inside: shiftEvent?.insidePingCount ?? 0,
+        outside: shiftEvent?.outsidePingCount ?? 0,
         missed: missedCount,
       },
       latestPings,
@@ -617,6 +711,7 @@ export async function getTodayLocationPresence(
   return {
     premisesId: targetPremises.id,
     premisesName: targetPremises.name,
+    address: targetPremises.address ?? null,
     latitude: String(targetPremises.latitude),
     longitude: String(targetPremises.longitude),
     radiusMeters: targetPremises.radiusMeters,

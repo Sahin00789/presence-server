@@ -11,7 +11,6 @@ import {
   buildAttendanceReport,
   buildAuditReport,
   buildPayrollReport,
-  buildWalletReport,
   getDashboardSummary,
   renderReport,
 } from './service.js';
@@ -25,7 +24,7 @@ export async function reportRoutes(fastify: FastifyInstance) {
       preHandler: [fastify.authenticate],
       schema: {
         description:
-          'Role-aware dashboard summary. Staff receive their own day, month summary, shift and wallet; Owners and Managers receive organization KPIs.',
+          'Role-aware dashboard summary. Staff receive their own day, month summary and shift; Owners and Managers receive organization KPIs.',
         tags: ['Reports'],
         response: { 200: dashboardSummarySchema },
       },
@@ -91,32 +90,6 @@ export async function reportRoutes(fastify: FastifyInstance) {
         periodId
       );
       const rendered = renderReport(table, format, 'payroll-report');
-      return reply
-        .type(rendered.contentType)
-        .header('Content-Disposition', `attachment; filename="${rendered.filename}"`)
-        .send(rendered.payload);
-    }
-  );
-
-  server.get(
-    '/api/v1/reports/wallet',
-    {
-      preHandler: [fastify.authenticate],
-      schema: {
-        description:
-          'Wallet liability report. Staff receive their own wallet; Owners and Managers receive organization totals.',
-        tags: ['Reports'],
-        querystring: z.object({ format: z.enum(['json', 'csv', 'pdf']).default('json') }),
-      },
-    },
-    async (request, reply) => {
-      const { format } = request.query as { format: 'json' | 'csv' | 'pdf' };
-      const table = await buildWalletReport(
-        fastify,
-        request.user,
-        request.user.organizationId
-      );
-      const rendered = renderReport(table, format, 'wallet-report');
       return reply
         .type(rendered.contentType)
         .header('Content-Disposition', `attachment; filename="${rendered.filename}"`)

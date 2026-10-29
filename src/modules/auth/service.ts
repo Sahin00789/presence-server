@@ -40,12 +40,117 @@ function hashOtp(code: string): string {
   return createHash('sha256').update(code).digest('hex');
 }
 
+interface ActiveMembership {
+  role: 'OWNER' | 'MANAGER' | 'STAFF';
+  organizationId: string;
+  organizationName: string;
+  organizationLogoUrl: string | null;
+  premisesId?: string | null;
+  premisesName?: string | null;
+}
+
+/**
+ * Resolves the caller's active organization context from the authoritative
+ * sources in the new schema: `organizations.owner_user_id` for Owners and
+ * `employees` for Managers/Staff. When `organizationId` is omitted the first
+ * active context is returned (used by refresh-token and profile calls).
+ */
+async function resolveActiveMembership(
+  fastify: FastifyInstance,
+  userId: string,
+  organizationId?: string
+): Promise<ActiveMembership | null> {
+  const ownerFilters = [eq(schema.organizations.ownerUserId, userId)];
+  if (organizationId) {
+    ownerFilters.push(eq(schema.organizations.id, organizationId));
+  }
+
+  const [ownedOrganization] = await fastify.db
+    .select({
+      organizationId: schema.organizations.id,
+      organizationName: schema.organizations.name,
+      organizationLogoUrl: schema.organizations.logoUrl,
+    })
+    .from(schema.organizations)
+    .where(and(...ownerFilters))
+    .limit(1);
+
+  if (ownedOrganization) {
+    return { role: 'OWNER', premisesId: null, premisesName: null, ...ownedOrganization };
+  }
+
+  const employeeFilters = [
+    eq(schema.employees.userId, userId),
+    eq(schema.employees.isActive, true),
+  ];
+  if (organizationId) {
+    employeeFilters.push(eq(schema.employees.organizationId, organizationId));
+  }
+
+  const [employee] = await fastify.db
+    .select({
+      role: schema.employees.role,
+      organizationId: schema.organizations.id,
+      organizationName: schema.organizations.name,
+      organizationLogoUrl: schema.organizations.logoUrl,
+      premisesId: schema.employees.premisesId,
+      premisesName: schema.premises.name,
+    })
+    .from(schema.employees)
+    .innerJoin(
+      schema.organizations,
+      eq(schema.employees.organizationId, schema.organizations.id)
+    )
+    .leftJoin(
+      schema.premises,
+      eq(schema.employees.premisesId, schema.premises.id)
+    )
+    .where(and(...employeeFilters))
+    .limit(1);
+
+  if (employee) {
+    return employee;
+  }
+
+  return null;
+}
+
 export async function requestOtp(
   fastify: FastifyInstance,
   input: OtpRequestInput
 ): Promise<OtpResponse> {
   const email = input.email.toLowerCase().trim();
   const role = input.role || 'STAFF';
+
+  // Role Account Verification & Access Rules:
+  // Unregistered Manager / Staff must be refused sign-in with explicit message.
+  if (role === 'MANAGER' || role === 'STAFF') {
+    const [userRecord] = await fastify.db
+      .select({ id: schema.users.id })
+      .from(schema.users)
+      .where(eq(schema.users.email, email))
+      .limit(1);
+
+    let isEmployee = false;
+    if (userRecord) {
+      const [employeeRecord] = await fastify.db
+        .select({ id: schema.employees.id })
+        .from(schema.employees)
+        .where(eq(schema.employees.userId, userRecord.id))
+        .limit(1);
+      if (employeeRecord) {
+        isEmployee = true;
+      }
+    }
+
+    if (!isEmployee) {
+      throw new AppError(
+        'You are not registered. Staff and Managers must be added and invited by the Organization Owner.',
+        403,
+        'NOT_REGISTERED'
+      );
+    }
+  }
 
   // Generate 6-digit OTP code
   const code = randomInt(100000, 1_000_000).toString();
@@ -172,88 +277,55 @@ export async function verifyOtp(
     fullName = existingUser.fullName;
   }
 
-  // 3. Check pending invitations if user does not exist
-  if (!userId) {
-    const [invitation] = await fastify.db
-      .select()
-      .from(schema.invitations)
-      .where(
-        and(
-          eq(schema.invitations.email, email),
-          isNull(schema.invitations.acceptedAt),
-          gt(schema.invitations.expiresAt, new Date())
-        )
-      )
-      .limit(1);
+  let membership = userId ? await resolveActiveMembership(fastify, userId) : null;
 
-    if (invitation) {
-      const [newUser] = await fastify.db
-        .insert(schema.users)
-        .values({
-          email,
-          fullName,
-          isActive: true,
-        })
-        .returning();
-
-      userId = newUser.id;
-
-      await fastify.db.insert(schema.memberships).values({
-        organizationId: invitation.organizationId,
-        userId,
-        role: invitation.role,
-        isActive: true,
-      });
-
-      await fastify.db
-        .update(schema.invitations)
-        .set({ acceptedAt: new Date() })
-        .where(eq(schema.invitations.id, invitation.id));
-    }
-  }
-
-  // 4. Handle non-existent user / uninvited account
-  if (!userId) {
+  // 3. Handle non-existent user or user without active membership
+  if (!membership) {
     if (requestedRole === 'OWNER') {
-      // Check if registration wizard parameters were provided
       if (input.organizationName) {
-        const [newOrg] = await fastify.db
-          .insert(schema.organizations)
-          .values({
-            name: input.organizationName,
-            timezone: input.timezone || 'Asia/Kolkata',
-            currency: input.currency || 'INR',
-          })
-          .returning();
+        const createdUserAndOrg = await fastify.db.transaction(async (tx) => {
+          let uId = userId;
+          let uName = fullName;
+          if (!uId) {
+            const [newUser] = await tx
+              .insert(schema.users)
+              .values({
+                email,
+                fullName: input.fullName || email.split('@')[0],
+                isActive: true,
+              })
+              .returning();
+            uId = newUser.id;
+            uName = newUser.fullName;
+          }
 
-        const [newUser] = await fastify.db
-          .insert(schema.users)
-          .values({
-            email,
-            fullName,
-            isActive: true,
-          })
-          .returning();
+          const [newOrg] = await tx
+            .insert(schema.organizations)
+            .values({
+              ownerUserId: uId,
+              name: input.organizationName!,
+              timezone: input.timezone || 'Asia/Kolkata',
+              currency: input.currency || 'INR',
+            })
+            .returning();
 
-        userId = newUser.id;
+          if (input.premisesName) {
+            await tx.insert(schema.premises).values({
+              organizationId: newOrg.id,
+              name: input.premisesName,
+              address: input.premisesAddress,
+              latitude: input.latitude || '0.0000000',
+              longitude: input.longitude || '0.0000000',
+              radiusMeters: input.radiusMeters || 50,
+              isActive: true,
+            });
+          }
 
-        await fastify.db.insert(schema.memberships).values({
-          organizationId: newOrg.id,
-          userId,
-          role: 'OWNER',
-          isActive: true,
+          return { userId: uId, fullName: uName };
         });
 
-        if (input.premisesName) {
-          await fastify.db.insert(schema.premises).values({
-            organizationId: newOrg.id,
-            name: input.premisesName,
-            latitude: '37.7749000',
-            longitude: '-122.4194000',
-            radiusMeters: input.radiusMeters || 50,
-            isActive: true,
-          });
-        }
+        userId = createdUserAndOrg.userId;
+        fullName = createdUserAndOrg.fullName;
       } else {
         throw new AppError(
           'You are not registered. Please complete Owner & Organization Registration.',
@@ -270,47 +342,30 @@ export async function verifyOtp(
     }
   }
 
-  // Fetch active user record and membership
+  // Fetch active user record and resolve the authoritative organization role.
   const [userRecord] = await fastify.db
     .select()
     .from(schema.users)
-    .where(eq(schema.users.id, userId))
+    .where(eq(schema.users.id, userId!))
     .limit(1);
 
   if (!userRecord || !userRecord.isActive) {
     throw new AppError('This account has been deactivated', 403, 'ACCOUNT_DEACTIVATED');
   }
 
-  const [membership] = await fastify.db
-    .select({
-      role: schema.memberships.role,
-      organizationId: schema.organizations.id,
-      organizationName: schema.organizations.name,
-      organizationLogoUrl: schema.organizations.logoUrl,
-    })
-    .from(schema.memberships)
-    .innerJoin(
-      schema.organizations,
-      eq(schema.memberships.organizationId, schema.organizations.id)
-    )
-    .where(
-      and(
-        eq(schema.memberships.userId, userId),
-        eq(schema.memberships.isActive, true)
-      )
-    )
-    .limit(1);
-
+  membership = await resolveActiveMembership(fastify, userId!);
   if (!membership) {
     throw new AppError('No active organization membership found', 403, 'NO_MEMBERSHIP');
   }
 
   return issueUserSession(fastify, {
-    userId,
-    googleSub: `email-sub-${userId}`,
+    userId: userId!,
+    googleSub: `email-sub-${userId!}`,
     organizationId: membership.organizationId,
     organizationName: membership.organizationName,
     organizationLogoUrl: membership.organizationLogoUrl,
+    premisesId: membership.premisesId,
+    premisesName: membership.premisesName,
     email: userRecord.email,
     fullName: userRecord.fullName,
     avatarUrl: userRecord.avatarUrl,
@@ -368,52 +423,6 @@ export async function processGoogleExchange(
   }
 
   if (!userId) {
-    const [invitation] = await fastify.db
-      .select()
-      .from(schema.invitations)
-      .where(
-        and(
-          eq(schema.invitations.email, googleProfile.email),
-          isNull(schema.invitations.acceptedAt),
-          gt(schema.invitations.expiresAt, new Date())
-        )
-      )
-      .limit(1);
-
-    if (invitation) {
-      const [newUser] = await fastify.db
-        .insert(schema.users)
-        .values({
-          email: googleProfile.email,
-          fullName: googleProfile.fullName,
-          avatarUrl: googleProfile.picture,
-          isActive: true,
-        })
-        .returning();
-
-      userId = newUser.id;
-
-      await fastify.db.insert(schema.googleIdentities).values({
-        userId,
-        googleSub: googleProfile.googleSub,
-        email: googleProfile.email,
-      });
-
-      await fastify.db.insert(schema.memberships).values({
-        organizationId: invitation.organizationId,
-        userId,
-        role: invitation.role,
-        isActive: true,
-      });
-
-      await fastify.db
-        .update(schema.invitations)
-        .set({ acceptedAt: new Date() })
-        .where(eq(schema.invitations.id, invitation.id));
-    }
-  }
-
-  if (!userId) {
     throw new AppError(
       `No account is registered for ${googleProfile.email}. If you are an Owner, please register your organization first. For other roles, contact your administrator.`,
       403,
@@ -431,26 +440,7 @@ export async function processGoogleExchange(
     throw new AppError('This user account is deactivated', 403, 'ACCOUNT_DEACTIVATED');
   }
 
-  const [membership] = await fastify.db
-    .select({
-      role: schema.memberships.role,
-      organizationId: schema.organizations.id,
-      organizationName: schema.organizations.name,
-      organizationLogoUrl: schema.organizations.logoUrl,
-    })
-    .from(schema.memberships)
-    .innerJoin(
-      schema.organizations,
-      eq(schema.memberships.organizationId, schema.organizations.id)
-    )
-    .where(
-      and(
-        eq(schema.memberships.userId, userId),
-        eq(schema.memberships.isActive, true)
-      )
-    )
-    .limit(1);
-
+  const membership = await resolveActiveMembership(fastify, userId);
   if (!membership) {
     throw new AppError('No active organization membership found', 403, 'NO_MEMBERSHIP');
   }
@@ -461,6 +451,8 @@ export async function processGoogleExchange(
     organizationId: membership.organizationId,
     organizationName: membership.organizationName,
     organizationLogoUrl: membership.organizationLogoUrl,
+    premisesId: membership.premisesId,
+    premisesName: membership.premisesName,
     email: userRecord.email,
     fullName: userRecord.fullName,
     avatarUrl: userRecord.avatarUrl,
@@ -504,15 +496,6 @@ export async function processGoogleOwnerRegistration(
   }
 
   const organization = await fastify.db.transaction(async (tx) => {
-    const [createdOrganization] = await tx
-      .insert(schema.organizations)
-      .values({
-        name: input.organizationName,
-        timezone: input.timezone || 'Asia/Kolkata',
-        currency: input.currency || 'INR',
-      })
-      .returning();
-
     const [createdUser] = await tx
       .insert(schema.users)
       .values({
@@ -523,24 +506,28 @@ export async function processGoogleOwnerRegistration(
       })
       .returning();
 
+    const [createdOrganization] = await tx
+      .insert(schema.organizations)
+      .values({
+        ownerUserId: createdUser.id,
+        name: input.organizationName || 'My Organization',
+        timezone: input.timezone || 'Asia/Kolkata',
+        currency: input.currency || 'INR',
+      })
+      .returning();
+
     await tx.insert(schema.googleIdentities).values({
       userId: createdUser.id,
       googleSub: googleProfile.googleSub,
       email: googleProfile.email,
     });
 
-    await tx.insert(schema.memberships).values({
-      organizationId: createdOrganization.id,
-      userId: createdUser.id,
-      role: 'OWNER',
-      isActive: true,
-    });
-
     await tx.insert(schema.premises).values({
       organizationId: createdOrganization.id,
-      name: input.premisesName,
-      latitude: '37.7749000',
-      longitude: '-122.4194000',
+      name: input.premisesName || 'Main Premises',
+      address: input.premisesAddress,
+      latitude: input.latitude || '0.0000000',
+      longitude: input.longitude || '0.0000000',
       radiusMeters: input.radiusMeters || 50,
       isActive: true,
     });
@@ -624,26 +611,7 @@ export async function processRefreshToken(
     throw new AppError('Account deactivated', 403, 'ACCOUNT_DEACTIVATED');
   }
 
-  const [membership] = await fastify.db
-    .select({
-      role: schema.memberships.role,
-      organizationId: schema.organizations.id,
-      organizationName: schema.organizations.name,
-      organizationLogoUrl: schema.organizations.logoUrl,
-    })
-    .from(schema.memberships)
-    .innerJoin(
-      schema.organizations,
-      eq(schema.memberships.organizationId, schema.organizations.id)
-    )
-    .where(
-      and(
-        eq(schema.memberships.userId, userId),
-        eq(schema.memberships.isActive, true)
-      )
-    )
-    .limit(1);
-
+  const membership = await resolveActiveMembership(fastify, userId);
   if (!membership) {
     throw new AppError('No active membership found', 403, 'NO_MEMBERSHIP');
   }
@@ -662,6 +630,8 @@ export async function processRefreshToken(
     organizationId: membership.organizationId,
     organizationName: membership.organizationName,
     organizationLogoUrl: membership.organizationLogoUrl,
+    premisesId: membership.premisesId,
+    premisesName: membership.premisesName,
     email: userRecord.email,
     fullName: userRecord.fullName,
     avatarUrl: userRecord.avatarUrl,
@@ -684,26 +654,7 @@ export async function processGetCurrentUser(
     throw new AppError('User account not found', 404, 'USER_NOT_FOUND');
   }
 
-  const [membership] = await fastify.db
-    .select({
-      role: schema.memberships.role,
-      organizationId: schema.organizations.id,
-      organizationName: schema.organizations.name,
-      organizationLogoUrl: schema.organizations.logoUrl,
-    })
-    .from(schema.memberships)
-    .innerJoin(
-      schema.organizations,
-      eq(schema.memberships.organizationId, schema.organizations.id)
-    )
-    .where(
-      and(
-        eq(schema.memberships.userId, userId),
-        eq(schema.memberships.isActive, true)
-      )
-    )
-    .limit(1);
-
+  const membership = await resolveActiveMembership(fastify, userId);
   if (!membership) {
     throw new AppError('No active membership found', 403, 'NO_MEMBERSHIP');
   }
@@ -715,6 +666,8 @@ export async function processGetCurrentUser(
     role: membership.role,
     organizationId: membership.organizationId,
     organizationName: membership.organizationName,
+    premisesId: membership.premisesId || null,
+    premisesName: membership.premisesName || null,
     avatarUrl: userRecord.avatarUrl || null,
     organizationLogoUrl: membership.organizationLogoUrl || null,
   };
@@ -881,6 +834,8 @@ async function issueUserSession(
     organizationId: string;
     organizationName: string;
     organizationLogoUrl?: string | null;
+    premisesId?: string | null;
+    premisesName?: string | null;
     email: string;
     fullName: string;
     avatarUrl?: string | null;
@@ -970,6 +925,8 @@ async function issueUserSession(
       role: params.role,
       organizationId: params.organizationId,
       organizationName: params.organizationName,
+      premisesId: params.premisesId || null,
+      premisesName: params.premisesName || null,
       avatarUrl: params.avatarUrl || null,
       organizationLogoUrl: params.organizationLogoUrl || null,
     },

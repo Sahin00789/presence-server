@@ -29,6 +29,7 @@ export async function getPremises(
         id: r.id,
         organizationId: r.organizationId,
         name: r.name,
+        address: r.address ?? null,
         latitude: String(r.latitude),
         longitude: String(r.longitude),
         radiusMeters: r.radiusMeters,
@@ -49,6 +50,7 @@ export async function createPremises(
     .values({
       organizationId,
       name: input.name,
+      address: input.address,
       latitude: input.latitude,
       longitude: input.longitude,
       radiusMeters: input.radiusMeters,
@@ -60,6 +62,7 @@ export async function createPremises(
     id: created.id,
     organizationId: created.organizationId,
     name: created.name,
+    address: created.address ?? null,
     latitude: String(created.latitude),
     longitude: String(created.longitude),
     radiusMeters: created.radiusMeters,
@@ -90,6 +93,7 @@ export async function updatePremises(
     .update(schema.premises)
     .set({
       ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.address !== undefined ? { address: input.address } : {}),
       ...(input.latitude !== undefined ? { latitude: input.latitude } : {}),
       ...(input.longitude !== undefined ? { longitude: input.longitude } : {}),
       ...(input.radiusMeters !== undefined ? { radiusMeters: input.radiusMeters } : {}),
@@ -111,6 +115,7 @@ export async function updatePremises(
     id: updated.id,
     organizationId: updated.organizationId,
     name: updated.name,
+    address: updated.address ?? null,
     latitude: String(updated.latitude),
     longitude: String(updated.longitude),
     radiusMeters: updated.radiusMeters,

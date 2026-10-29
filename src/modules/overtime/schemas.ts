@@ -23,7 +23,7 @@ export const overtimeSchema = z.object({
   endTime: z.string(),
   plannedMinutes: z.number().int(),
   workedMinutes: z.number().int(),
-  paymentCents: z.number().int(),
+  paymentInr: z.number().int(),
   status: overtimeStatusSchema,
   reason: z.string().nullable(),
   attendanceEventId: z.string().uuid().nullable(),
@@ -37,8 +37,8 @@ export const createOvertimeSchema = z.object({
   workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   startTime: z.string().regex(/^\d{2}:\d{2}$/),
   endTime: z.string().regex(/^\d{2}:\d{2}$/),
-  /** Agreed payment for the overtime, in minor units. */
-  paymentCents: z.number().int().positive(),
+  /** Agreed payment for the overtime, in INR. */
+  paymentInr: z.number().int().positive(),
   reason: z.string().trim().min(2).max(500),
 });
 

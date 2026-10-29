@@ -43,35 +43,33 @@ export async function getOrganizationSummary(
 ): Promise<OrganizationSummary> {
   const organization = await getOrganization(fastify, organizationId);
 
-  const [memberTotals] = await fastify.db
-    .select({ total: count() })
-    .from(schema.memberships)
-    .where(
-      and(
-        eq(schema.memberships.organizationId, organizationId),
-        eq(schema.memberships.isActive, true)
-      )
-    );
-
   const [staffTotals] = await fastify.db
     .select({ total: count() })
-    .from(schema.staffProfiles)
-    .where(eq(schema.staffProfiles.organizationId, organizationId));
+    .from(schema.employees)
+    .where(
+      and(
+        eq(schema.employees.organizationId, organizationId),
+        eq(schema.employees.isActive, true),
+        eq(schema.employees.role, 'STAFF')
+      )
+    );
 
   const [managerTotals] = await fastify.db
     .select({ total: count() })
-    .from(schema.memberships)
+    .from(schema.employees)
     .where(
       and(
-        eq(schema.memberships.organizationId, organizationId),
-        eq(schema.memberships.role, 'MANAGER'),
-        eq(schema.memberships.isActive, true)
+        eq(schema.employees.organizationId, organizationId),
+        eq(schema.employees.isActive, true),
+        eq(schema.employees.role, 'MANAGER')
       )
     );
 
+  const memberCount = 1 + (staffTotals?.total ?? 0) + (managerTotals?.total ?? 0);
+
   return {
     organization,
-    memberCount: memberTotals?.total ?? 0,
+    memberCount,
     staffCount: staffTotals?.total ?? 0,
     managerCount: managerTotals?.total ?? 0,
   };
@@ -80,9 +78,8 @@ export async function getOrganizationSummary(
 /**
  * Creates an additional organization for an Owner.
  *
- * The Owner keeps their existing membership and gains an `OWNER` membership in
- * the newly created organization (`docs/ROLE_PERMISSIONS.md` §3.1 - a user may
- * belong to more than one organization).
+ * Ownership is recorded directly on `organizations.owner_user_id`; there is no
+ * separate membership table. A user may own more than one organization.
  */
 export async function createOrganization(
   fastify: FastifyInstance,
@@ -93,23 +90,18 @@ export async function createOrganization(
     const [organization] = await tx
       .insert(schema.organizations)
       .values({
+        ownerUserId,
         name: input.name,
         timezone: input.timezone,
         currency: input.currency.toUpperCase(),
       })
       .returning();
 
-    await tx.insert(schema.memberships).values({
-      organizationId: organization.id,
-      userId: ownerUserId,
-      role: 'OWNER',
-      isActive: true,
-    });
-
     if (input.premisesName) {
       await tx.insert(schema.premises).values({
         organizationId: organization.id,
         name: input.premisesName,
+        address: input.premisesAddress,
         latitude: input.latitude ?? '0.0000000',
         longitude: input.longitude ?? '0.0000000',
         radiusMeters: input.radiusMeters ?? 50,
@@ -190,49 +182,81 @@ export async function listOrganizationMembers(
   fastify: FastifyInstance,
   organizationId: string
 ): Promise<OrganizationMember[]> {
-  const rows = await fastify.db
+  const [owner] = await fastify.db
     .select({
+      organizationId: schema.organizations.id,
+      joinedAt: schema.organizations.createdAt,
       userId: schema.users.id,
       email: schema.users.email,
       fullName: schema.users.fullName,
       avatarUrl: schema.users.avatarUrl,
-      role: schema.memberships.role,
-      isActive: schema.memberships.isActive,
-      joinedAt: schema.memberships.joinedAt,
-      staffProfileId: schema.staffProfiles.id,
-      staffCode: schema.staffProfiles.staffCode,
-      premisesId: schema.staffProfiles.premisesId,
+      userIsActive: schema.users.isActive,
+    })
+    .from(schema.organizations)
+    .innerJoin(schema.users, eq(schema.organizations.ownerUserId, schema.users.id))
+    .where(eq(schema.organizations.id, organizationId))
+    .limit(1);
+
+  if (!owner) {
+    throw new AppError('Organization not found', 404, 'ORGANIZATION_NOT_FOUND');
+  }
+
+  const employeeRows = await fastify.db
+    .select({
+      userId: schema.employees.userId,
+      email: schema.users.email,
+      fullName: schema.users.fullName,
+      avatarUrl: schema.users.avatarUrl,
+      role: schema.employees.role,
+      isActive: schema.employees.isActive,
+      userIsActive: schema.users.isActive,
+      joinedAt: schema.employees.createdAt,
+      staffProfileId: schema.employees.id,
+      staffCode: schema.employees.employeeCode,
+      premisesId: schema.employees.premisesId,
       premisesName: schema.premises.name,
     })
-    .from(schema.memberships)
-    .innerJoin(schema.users, eq(schema.memberships.userId, schema.users.id))
-    .leftJoin(
-      schema.staffProfiles,
-      and(
-        eq(schema.staffProfiles.userId, schema.memberships.userId),
-        eq(schema.staffProfiles.organizationId, organizationId)
-      )
-    )
-    .leftJoin(schema.premises, eq(schema.premises.id, schema.staffProfiles.premisesId))
-    .where(eq(schema.memberships.organizationId, organizationId));
+    .from(schema.employees)
+    .innerJoin(schema.users, eq(schema.employees.userId, schema.users.id))
+    .leftJoin(schema.premises, eq(schema.premises.id, schema.employees.premisesId))
+    .where(eq(schema.employees.organizationId, organizationId));
 
-  return rows.map((row) => ({
-    userId: row.userId,
-    email: row.email,
-    fullName: row.fullName,
-    avatarUrl: row.avatarUrl,
-    role: row.role,
-    isActive: row.isActive,
-    joinedAt: row.joinedAt.toISOString(),
-    staffProfileId: row.staffProfileId,
-    staffCode: row.staffCode,
-    premisesId: row.premisesId,
-    premisesName: row.premisesName ?? null,
-  }));
+  const members: OrganizationMember[] = [
+    {
+      userId: owner.userId,
+      email: owner.email,
+      fullName: owner.fullName,
+      avatarUrl: owner.avatarUrl,
+      role: 'OWNER',
+      isActive: owner.userIsActive,
+      joinedAt: owner.joinedAt.toISOString(),
+      staffProfileId: null,
+      staffCode: null,
+      premisesId: null,
+      premisesName: null,
+    },
+    ...employeeRows
+      .filter((row) => row.userId)
+      .map((row) => ({
+        userId: row.userId as string,
+        email: row.email,
+        fullName: row.fullName,
+        avatarUrl: row.avatarUrl,
+        role: row.role,
+        isActive: row.isActive && row.userIsActive,
+        joinedAt: row.joinedAt.toISOString(),
+        staffProfileId: row.staffProfileId,
+        staffCode: row.staffCode,
+        premisesId: row.premisesId,
+        premisesName: row.premisesName ?? null,
+      })),
+  ];
+
+  return members;
 }
 
 /**
- * Deactivates (never deletes) a member of the organization.
+ * Deactivates (never deletes) an employee of the organization.
  *
  * `docs/SECURITY.md` §2.4 requires biometric data to be deleted upon
  * termination, so deactivating a staff member also removes their face template.
@@ -247,22 +271,17 @@ export async function deactivateMember(
     throw new AppError('You cannot deactivate your own account', 400, 'SELF_DEACTIVATION');
   }
 
-  const [membership] = await fastify.db
-    .select()
-    .from(schema.memberships)
-    .where(
-      and(
-        eq(schema.memberships.organizationId, organizationId),
-        eq(schema.memberships.userId, targetUserId)
-      )
-    )
+  const [organization] = await fastify.db
+    .select({ ownerUserId: schema.organizations.ownerUserId })
+    .from(schema.organizations)
+    .where(eq(schema.organizations.id, organizationId))
     .limit(1);
 
-  if (!membership) {
-    throw new AppError('Member not found in this organization', 404, 'MEMBER_NOT_FOUND');
+  if (!organization) {
+    throw new AppError('Organization not found', 404, 'ORGANIZATION_NOT_FOUND');
   }
 
-  if (membership.role === 'OWNER') {
+  if (organization.ownerUserId === targetUserId) {
     throw new AppError(
       'The organization owner cannot be deactivated',
       403,
@@ -270,55 +289,44 @@ export async function deactivateMember(
     );
   }
 
+  const [profile] = await fastify.db
+    .select()
+    .from(schema.employees)
+    .where(
+      and(
+        eq(schema.employees.organizationId, organizationId),
+        eq(schema.employees.userId, targetUserId)
+      )
+    )
+    .limit(1);
+
+  if (!profile) {
+    throw new AppError('Member not found in this organization', 404, 'MEMBER_NOT_FOUND');
+  }
+
   await fastify.db.transaction(async (tx) => {
     await tx
-      .update(schema.memberships)
-      .set({ isActive: false })
-      .where(
-        and(
-          eq(schema.memberships.organizationId, organizationId),
-          eq(schema.memberships.userId, targetUserId)
-        )
-      );
+      .update(schema.employees)
+      .set({
+        isActive: false,
+        terminationDate: new Date().toISOString().slice(0, 10),
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.employees.id, profile.id));
 
-    const [profile] = await tx
-      .select({ id: schema.staffProfiles.id })
-      .from(schema.staffProfiles)
-      .where(
-        and(
-          eq(schema.staffProfiles.organizationId, organizationId),
-          eq(schema.staffProfiles.userId, targetUserId)
-        )
-      )
-      .limit(1);
-
-    if (profile) {
-      await tx
-        .update(schema.staffProfiles)
-        .set({ terminationDate: new Date().toISOString().slice(0, 10) })
-        .where(eq(schema.staffProfiles.id, profile.id));
-
-      // Biometric data must be purged on termination.
-      await tx
-        .delete(schema.faceTemplates)
-        .where(eq(schema.faceTemplates.staffProfileId, profile.id));
-
-      await tx.insert(schema.employmentRecords).values({
-        staffProfileId: profile.id,
-        status: 'TERMINATED',
-        effectiveFrom: new Date().toISOString().slice(0, 10),
-        note: 'Employment terminated.',
-      });
-    }
+    // Biometric data must be purged on termination.
+    await tx
+      .delete(schema.multiPoseFaceTemplates)
+      .where(eq(schema.multiPoseFaceTemplates.employeeId, profile.id));
   });
 
   await writeAuditLog(fastify, {
     organizationId,
     actorId: actorUserId,
     action: 'MEMBER_DEACTIVATED',
-    resourceType: 'membership',
-    resourceId: membership.id,
-    metadata: { targetUserId, role: membership.role },
+    resourceType: 'employee',
+    resourceId: profile.id,
+    metadata: { targetUserId, role: profile.role },
   });
 
   return { deactivated: true };

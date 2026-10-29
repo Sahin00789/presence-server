@@ -1,1 +1,0 @@
-ALTER TABLE "shift_templates" ADD COLUMN "days_of_week" text;

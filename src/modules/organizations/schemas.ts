@@ -15,6 +15,7 @@ export const createOrganizationSchema = z.object({
   timezone: z.string().trim().min(1).default('Asia/Kolkata'),
   currency: z.string().trim().length(3).default('INR'),
   premisesName: z.string().trim().min(2).optional(),
+  premisesAddress: z.string().optional(),
   latitude: z.string().trim().optional(),
   longitude: z.string().trim().optional(),
   radiusMeters: z.number().int().min(10).max(10_000).optional(),

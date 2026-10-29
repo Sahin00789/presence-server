@@ -14,8 +14,6 @@ export const shiftSchema = z.object({
   updatedAt: z.date().or(z.string()).optional(),
 });
 
-export const shiftTemplateSchema = shiftSchema;
-
 export const createShiftSchema = z.object({
   premisesId: z.string().uuid(),
   shiftName: z.string().trim().min(2).max(80),
@@ -35,10 +33,7 @@ export const createShiftSchema = z.object({
   isActive: z.boolean().optional().default(true),
 });
 
-export const createShiftTemplateSchema = createShiftSchema;
-
 export const updateShiftSchema = createShiftSchema.partial();
-export const updateShiftTemplateSchema = updateShiftSchema;
 
 export const employeeShiftAssignmentSchema = z.object({
   id: z.string().uuid(),
@@ -75,62 +70,8 @@ export const createShiftAssignmentSchema = createEmployeeShiftAssignmentSchema;
 export const updateEmployeeShiftAssignmentSchema = createEmployeeShiftAssignmentSchema.partial();
 export const updateShiftAssignmentSchema = updateEmployeeShiftAssignmentSchema;
 
-export const weeklyOffSchema = z.object({
-  staffProfileId: z.string(),
-  daysOfWeek: z.array(z.number().int().min(0).max(6)),
-});
-
-export const setWeeklyOffSchema = z.object({
-  staffProfileId: z.string().uuid().optional(),
-  daysOfWeek: z.array(z.number().int().min(0).max(6)).max(7),
-});
-
-export const holidaySchema = z.object({
-  id: z.string(),
-  organizationId: z.string(),
-  name: z.string(),
-  date: z.string(),
-  isPaid: z.boolean(),
-});
-
-export const createHolidaySchema = z.object({
-  name: z.string().trim().min(2).max(120),
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD'),
-  isPaid: z.boolean().default(true),
-});
-
-export const scheduleEntrySchema = z.object({
-  date: z.string(),
-  dayOfWeek: z.number(),
-  type: z.enum(['SHIFT', 'WEEKLY_OFF', 'HOLIDAY', 'UNSCHEDULED']),
-  shiftTemplateId: z.string().nullable(),
-  shiftName: z.string().nullable(),
-  startTime: z.string().nullable(),
-  endTime: z.string().nullable(),
-  breakMinutes: z.number().nullable(),
-  lateGraceMinutes: z.number().nullable(),
-  halfDayThresholdMinutes: z.number().nullable(),
-  scheduledMinutes: z.number(),
-  overnight: z.boolean(),
-  startAt: z.string().nullable(),
-  endAt: z.string().nullable(),
-  holidayName: z.string().nullable(),
-  isPaidHoliday: z.boolean().nullable(),
-  lateClockInAllowed: z.boolean().nullable().optional(),
-});
-
-export const scheduleQuerySchema = z.object({
-  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  staffProfileId: z.string().uuid().optional(),
-});
-
-export type ShiftTemplate = z.infer<typeof shiftTemplateSchema>;
-export type CreateShiftTemplateInput = z.infer<typeof createShiftTemplateSchema>;
-export type UpdateShiftTemplateInput = z.infer<typeof updateShiftTemplateSchema>;
+export type Shift = z.infer<typeof shiftSchema>;
+export type CreateShiftInput = z.infer<typeof createShiftSchema>;
+export type UpdateShiftInput = z.infer<typeof updateShiftSchema>;
 export type ShiftAssignment = z.infer<typeof shiftAssignmentSchema>;
 export type CreateShiftAssignmentInput = z.infer<typeof createShiftAssignmentSchema>;
-export type Holiday = z.infer<typeof holidaySchema>;
-export type CreateHolidayInput = z.infer<typeof createHolidaySchema>;
-export type ScheduleEntry = z.infer<typeof scheduleEntrySchema>;
-export type ScheduleQuery = z.infer<typeof scheduleQuerySchema>;

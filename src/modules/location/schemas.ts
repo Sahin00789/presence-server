@@ -7,6 +7,8 @@ export const locationCheckBodySchema = z.object({
   accuracyMeters: z.number().nonnegative(),
   isMock: z.boolean().optional(),
   timestamp: z.string().datetime().optional(),
+  /** Client-generated UUID so a retried ping is stored exactly once. */
+  clientRequestId: z.string().uuid().optional(),
 });
 
 export type LocationCheckBody = z.infer<typeof locationCheckBodySchema>;
@@ -67,6 +69,7 @@ export const locationStaffCardSchema = z.object({
   overtimeClockOutTime: z.string().nullable(),
   shiftStatus: z.string(),
   hasOvertimeToday: z.boolean(),
+  overtimeId: z.string().uuid().nullable(),
   consecutiveFailures: z.number().int().nonnegative(),
   exceptionId: z.string().nullable(),
   counts: gpsCountsSchema,
@@ -85,6 +88,7 @@ export type LocationPresenceQuery = z.infer<typeof locationPresenceQuerySchema>;
 export const locationTodayPresenceResponseSchema = z.object({
   premisesId: z.string().nullable(),
   premisesName: z.string().nullable(),
+  address: z.string().nullable().optional(),
   latitude: z.string().nullable(),
   longitude: z.string().nullable(),
   radiusMeters: z.number().nullable(),

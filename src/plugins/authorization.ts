@@ -16,6 +16,7 @@ export default fp(async (fastify) => {
 
       if (!user || !allowedRoles.includes(user.role)) {
         return reply.status(403).send({
+          status: 'error',
           statusCode: 403,
           error: 'Forbidden',
           code: 'INSUFFICIENT_PERMISSIONS',

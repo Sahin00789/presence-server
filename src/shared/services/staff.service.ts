@@ -1,15 +1,14 @@
 import { FastifyInstance } from 'fastify';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../errors/app-error.js';
 
-export type StaffProfileRecord = typeof schema.staffProfiles.$inferSelect;
+export type StaffProfileRecord = typeof schema.employees.$inferSelect;
 
 /**
- * Resolves the staff profile that belongs to the authenticated user inside the
- * given organization. Every staff-scoped query funnels through here so the
- * `organization_id` guard is applied in exactly one place
- * (`docs/ROLE_PERMISSIONS.md` §3).
+ * Resolves the employee record that belongs to the authenticated user inside
+ * the given organization. Every staff-scoped query funnels through here so the
+ * `organization_id` guard is applied in exactly one place.
  */
 export async function findStaffProfile(
   fastify: FastifyInstance,
@@ -18,11 +17,11 @@ export async function findStaffProfile(
 ): Promise<StaffProfileRecord | null> {
   const [profile] = await fastify.db
     .select()
-    .from(schema.staffProfiles)
+    .from(schema.employees)
     .where(
       and(
-        eq(schema.staffProfiles.userId, userId),
-        eq(schema.staffProfiles.organizationId, organizationId)
+        eq(schema.employees.userId, userId),
+        eq(schema.employees.organizationId, organizationId)
       )
     )
     .limit(1);
@@ -31,11 +30,10 @@ export async function findStaffProfile(
 }
 
 /**
- * Same as {@link findStaffProfile} but creates a profile on demand.
+ * Same as {@link findStaffProfile} but creates an employee record on demand.
  *
- * Managers are also employees (`docs/ROLE_PERMISSIONS.md` allows a Manager to
- * clock in "If Employed"), so an employment record can legitimately be created
- * the first time somebody clocks in.
+ * Managers are also employees, so an employment record can legitimately be
+ * created the first time somebody clocks in.
  */
 export async function ensureStaffProfile(
   fastify: FastifyInstance,
@@ -47,102 +45,109 @@ export async function ensureStaffProfile(
     return existing;
   }
 
+  const [user] = await fastify.db
+    .select({ fullName: schema.users.fullName })
+    .from(schema.users)
+    .where(eq(schema.users.id, userId))
+    .limit(1);
+
+  if (!user) {
+    throw new AppError('User account not found', 404, 'USER_NOT_FOUND');
+  }
+
+  const [org] = await fastify.db
+    .select({ ownerUserId: schema.organizations.ownerUserId })
+    .from(schema.organizations)
+    .where(eq(schema.organizations.id, organizationId))
+    .limit(1);
+
+  if (org?.ownerUserId === userId) {
+    throw new AppError(
+      'The organization owner is not an employee and cannot have an employee profile.',
+      400,
+      'OWNER_CANNOT_BE_EMPLOYEE'
+    );
+  }
+
   const [created] = await fastify.db
-    .insert(schema.staffProfiles)
+    .insert(schema.employees)
     .values({
       organizationId,
       userId,
-      staffCode: await generateStaffCode(fastify, organizationId),
+      role: 'STAFF',
+      name: user.fullName,
+      employeeCode: await generateStaffCode(fastify, organizationId),
       hireDate: new Date().toISOString().slice(0, 10),
     })
     .returning();
-
-  await fastify.db.insert(schema.employmentRecords).values({
-    staffProfileId: created.id,
-    status: 'ACTIVE',
-    effectiveFrom: created.hireDate,
-    note: 'Auto-provisioned on first clock-in.',
-  });
 
   return created;
 }
 
 /**
- * Resolves a staff profile by either staffProfileId or userId.
- * Auto-provisions a staff profile if the user exists in the organization but
- * does not have a staff profile record yet (e.g. Managers).
+ * Resolves an employee by either employeeId or userId.
+ * Auto-provisions an employee record if the user exists in the organization but
+ * does not have an employee record yet (e.g. Managers).
  */
 export async function resolveStaffProfile(
   fastify: FastifyInstance,
   organizationId: string,
-  staffProfileOrUserId: string
+  employeeOrUserId: string
 ): Promise<StaffProfileRecord> {
-  const [byProfileId] = await fastify.db
+  const [byEmployeeId] = await fastify.db
     .select()
-    .from(schema.staffProfiles)
+    .from(schema.employees)
     .where(
       and(
-        eq(schema.staffProfiles.id, staffProfileOrUserId),
-        eq(schema.staffProfiles.organizationId, organizationId)
+        eq(schema.employees.id, employeeOrUserId),
+        eq(schema.employees.organizationId, organizationId)
       )
     )
     .limit(1);
 
-  if (byProfileId) {
-    return byProfileId;
+  if (byEmployeeId) {
+    return byEmployeeId;
   }
 
-  const byUserId = await findStaffProfile(fastify, staffProfileOrUserId, organizationId);
+  const byUserId = await findStaffProfile(fastify, employeeOrUserId, organizationId);
   if (byUserId) {
     return byUserId;
   }
 
-  const [membership] = await fastify.db
-    .select({ userId: schema.memberships.userId })
-    .from(schema.memberships)
-    .where(
-      and(
-        eq(schema.memberships.organizationId, organizationId),
-        eq(schema.memberships.userId, staffProfileOrUserId)
-      )
-    )
+  const [user] = await fastify.db
+    .select({ id: schema.users.id })
+    .from(schema.users)
+    .where(eq(schema.users.id, employeeOrUserId))
     .limit(1);
 
-  if (membership) {
-    return await ensureStaffProfile(fastify, membership.userId, organizationId);
+  if (user) {
+    return ensureStaffProfile(fastify, user.id, organizationId);
   }
 
   throw new AppError('Staff profile not found', 404, 'STAFF_PROFILE_NOT_FOUND');
 }
 
-/** Generates a unique human-readable staff code such as `STF-0007`. */
+/** Generates a unique human-readable employee code such as `STF-0007`. */
 export async function generateStaffCode(
   fastify: FastifyInstance,
   organizationId: string
 ): Promise<string> {
   const rows = await fastify.db
-    .select({ id: schema.staffProfiles.id })
-    .from(schema.staffProfiles)
-    .where(eq(schema.staffProfiles.organizationId, organizationId));
+    .select({ id: schema.employees.id })
+    .from(schema.employees)
+    .where(eq(schema.employees.organizationId, organizationId));
 
-  const used = new Set<string>();
-  for (const row of rows) {
-    used.add(row.id);
-  }
-
-  // Codes are derived from the row count plus a random suffix to stay unique
-  // even under concurrent inserts.
   for (let attempt = 0; attempt < 25; attempt += 1) {
     const candidate = `STF-${String(rows.length + attempt + 1).padStart(4, '0')}-${Math.floor(
       Math.random() * 900 + 100
     )}`;
     const [clash] = await fastify.db
-      .select({ id: schema.staffProfiles.id })
-      .from(schema.staffProfiles)
+      .select({ id: schema.employees.id })
+      .from(schema.employees)
       .where(
         and(
-          eq(schema.staffProfiles.organizationId, organizationId),
-          eq(schema.staffProfiles.staffCode, candidate)
+          eq(schema.employees.organizationId, organizationId),
+          eq(schema.employees.employeeCode, candidate)
         )
       )
       .limit(1);
@@ -156,39 +161,75 @@ export async function generateStaffCode(
 
 /**
  * Resolves every user id that should receive operational notifications for a
- * given organization (owners + managers + the staff member themselves).
+ * given organization (owner + managers + the employee themselves).
  */
 export async function resolveNotificationTargets(
   fastify: FastifyInstance,
   organizationId: string,
-  staffProfileId?: string,
-  includeManagers = true
+  employeeId?: string,
+  includeManagers = true,
+  premisesId?: string | null
 ): Promise<string[]> {
   const targets = new Set<string>();
 
-  const memberships = await fastify.db
-    .select({ userId: schema.memberships.userId, role: schema.memberships.role })
-    .from(schema.memberships)
-    .where(
-      and(
-        eq(schema.memberships.organizationId, organizationId),
-        eq(schema.memberships.isActive, true)
-      )
-    );
+  if (includeManagers) {
+    const [organization] = await fastify.db
+      .select({ ownerUserId: schema.organizations.ownerUserId })
+      .from(schema.organizations)
+      .where(eq(schema.organizations.id, organizationId))
+      .limit(1);
 
-  for (const membership of memberships) {
-    if (includeManagers && (membership.role === 'OWNER' || membership.role === 'MANAGER')) {
-      targets.add(membership.userId);
+    if (organization?.ownerUserId) {
+      targets.add(organization.ownerUserId);
+    }
+
+    if (premisesId) {
+      const managers = await fastify.db
+        .select({ userId: schema.employees.userId })
+        .from(schema.employees)
+        .where(
+          and(
+            eq(schema.employees.organizationId, organizationId),
+            eq(schema.employees.role, 'MANAGER'),
+            eq(schema.employees.isActive, true),
+            eq(schema.employees.premisesId, premisesId),
+            isNotNull(schema.employees.userId)
+          )
+        );
+
+      for (const manager of managers) {
+        if (manager.userId) {
+          targets.add(manager.userId);
+        }
+      }
+    } else {
+      const managers = await fastify.db
+        .select({ userId: schema.employees.userId })
+        .from(schema.employees)
+        .where(
+          and(
+            eq(schema.employees.organizationId, organizationId),
+            eq(schema.employees.role, 'MANAGER'),
+            eq(schema.employees.isActive, true),
+            isNotNull(schema.employees.userId)
+          )
+        );
+
+      for (const manager of managers) {
+        if (manager.userId) {
+          targets.add(manager.userId);
+        }
+      }
     }
   }
 
-  if (staffProfileId) {
+  if (employeeId) {
     const [profile] = await fastify.db
-      .select({ userId: schema.staffProfiles.userId })
-      .from(schema.staffProfiles)
-      .where(eq(schema.staffProfiles.id, staffProfileId))
+      .select({ userId: schema.employees.userId, premisesId: schema.employees.premisesId })
+      .from(schema.employees)
+      .where(eq(schema.employees.id, employeeId))
       .limit(1);
-    if (profile) {
+    if (profile?.userId) {
       targets.add(profile.userId);
     }
   }
@@ -197,14 +238,14 @@ export async function resolveNotificationTargets(
 }
 
 /**
- * Lists every active staff profile of an organization joined with its user.
+ * Lists every employee of an organization joined with its user.
  */
 export async function listOrganizationStaff(
   fastify: FastifyInstance,
   organizationId: string
 ): Promise<
   Array<
-    typeof schema.staffProfiles.$inferSelect & {
+    typeof schema.employees.$inferSelect & {
       email: string;
       fullName: string;
       userIsActive: boolean;
@@ -213,24 +254,27 @@ export async function listOrganizationStaff(
 > {
   return fastify.db
     .select({
-      id: schema.staffProfiles.id,
-      organizationId: schema.staffProfiles.organizationId,
-      userId: schema.staffProfiles.userId,
-      premisesId: schema.staffProfiles.premisesId,
-      staffCode: schema.staffProfiles.staffCode,
-      department: schema.staffProfiles.department,
-      designation: schema.staffProfiles.designation,
-      hireDate: schema.staffProfiles.hireDate,
-      terminationDate: schema.staffProfiles.terminationDate,
-      createdAt: schema.staffProfiles.createdAt,
-      updatedAt: schema.staffProfiles.updatedAt,
+      id: schema.employees.id,
+      organizationId: schema.employees.organizationId,
+      userId: schema.employees.userId,
+      premisesId: schema.employees.premisesId,
+      role: schema.employees.role,
+      employeeCode: schema.employees.employeeCode,
+      name: schema.employees.name,
+      department: schema.employees.department,
+      designation: schema.employees.designation,
+      hireDate: schema.employees.hireDate,
+      terminationDate: schema.employees.terminationDate,
+      isActive: schema.employees.isActive,
+      createdAt: schema.employees.createdAt,
+      updatedAt: schema.employees.updatedAt,
       email: schema.users.email,
       fullName: schema.users.fullName,
       userIsActive: schema.users.isActive,
     })
-    .from(schema.staffProfiles)
-    .innerJoin(schema.users, eq(schema.staffProfiles.userId, schema.users.id))
-    .where(eq(schema.staffProfiles.organizationId, organizationId));
+    .from(schema.employees)
+    .innerJoin(schema.users, eq(schema.employees.userId, schema.users.id))
+    .where(eq(schema.employees.organizationId, organizationId));
 }
 
 /**
@@ -241,17 +285,11 @@ export async function listOwnerUserIds(
   organizationId: string
 ): Promise<string[]> {
   const rows = await fastify.db
-    .select({ userId: schema.memberships.userId })
-    .from(schema.memberships)
-    .where(
-      and(
-        eq(schema.memberships.organizationId, organizationId),
-        eq(schema.memberships.role, 'OWNER'),
-        eq(schema.memberships.isActive, true)
-      )
-    );
+    .select({ ownerUserId: schema.organizations.ownerUserId })
+    .from(schema.organizations)
+    .where(eq(schema.organizations.id, organizationId));
 
-  return rows.map((row) => row.userId);
+  return rows.map((row) => row.ownerUserId);
 }
 
 /**
@@ -262,40 +300,41 @@ export async function listManagerUserIds(
   organizationId: string
 ): Promise<string[]> {
   const rows = await fastify.db
-    .select({ userId: schema.memberships.userId })
-    .from(schema.memberships)
+    .select({ userId: schema.employees.userId })
+    .from(schema.employees)
     .where(
       and(
-        eq(schema.memberships.organizationId, organizationId),
-        eq(schema.memberships.role, 'MANAGER'),
-        eq(schema.memberships.isActive, true)
+        eq(schema.employees.organizationId, organizationId),
+        eq(schema.employees.role, 'MANAGER'),
+        eq(schema.employees.isActive, true),
+        isNotNull(schema.employees.userId)
       )
     );
 
-  return rows.map((row) => row.userId);
+  return rows.map((row) => row.userId).filter((id): id is string => Boolean(id));
 }
 
 /**
- * Returns the user ids of the given staff profile ids inside an organization.
+ * Returns the user ids of the given employee ids inside an organization.
  */
 export async function listUserIdsForProfiles(
   fastify: FastifyInstance,
   organizationId: string,
-  staffProfileIds: string[]
+  employeeIds: string[]
 ): Promise<string[]> {
-  if (staffProfileIds.length === 0) {
+  if (employeeIds.length === 0) {
     return [];
   }
 
   const rows = await fastify.db
-    .select({ userId: schema.staffProfiles.userId })
-    .from(schema.staffProfiles)
+    .select({ userId: schema.employees.userId })
+    .from(schema.employees)
     .where(
       and(
-        eq(schema.staffProfiles.organizationId, organizationId),
-        inArray(schema.staffProfiles.id, staffProfileIds)
+        eq(schema.employees.organizationId, organizationId),
+        inArray(schema.employees.id, employeeIds)
       )
     );
 
-  return rows.map((row) => row.userId);
+  return rows.map((row) => row.userId).filter((id): id is string => Boolean(id));
 }

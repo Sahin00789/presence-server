@@ -189,16 +189,6 @@ export class CacheService {
     const orgTag = `org:${organizationId}`;
 
     switch (type) {
-      case 'wallet_update':
-        this.invalidateTag(`${orgTag}:wallet`);
-        this.invalidateTag(`${orgTag}:dashboard`);
-        if (userIds) {
-          for (const uid of userIds) {
-            this.invalidateTag(`user:${uid}:wallet`);
-          }
-        }
-        break;
-
       case 'attendance_update':
         this.invalidateTag(`${orgTag}:attendance`);
         this.invalidateTag(`${orgTag}:dashboard`);
@@ -230,7 +220,6 @@ export class CacheService {
 
       case 'payroll_update':
         this.invalidateTag(`${orgTag}:payroll`);
-        this.invalidateTag(`${orgTag}:wallet`);
         this.invalidateTag(`${orgTag}:dashboard`);
         break;
 
