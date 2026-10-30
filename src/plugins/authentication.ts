@@ -41,18 +41,45 @@ export default fp(async (fastify) => {
 
       // 1. PostgreSQL Logged Device Session Verification (Single-Device Enforcement)
       const [deviceRecord] = await fastify.db
-        .select({ isActive: schema.loggedDevices.isActive })
+        .select({
+          isActive: schema.loggedDevices.isActive,
+          userId: schema.loggedDevices.userId,
+          expiresAt: schema.loggedDevices.expiresAt,
+        })
         .from(schema.loggedDevices)
         .where(eq(schema.loggedDevices.sessionJti, payload.jti))
         .limit(1);
 
-      if (deviceRecord && !deviceRecord.isActive) {
+      // A token whose session row no longer exists must never be trusted.
+      if (!deviceRecord || deviceRecord.userId !== payload.userId) {
+        return reply.status(401).send({
+          status: 'error',
+          statusCode: 401,
+          error: 'Unauthorized',
+          code: 'SESSION_NOT_FOUND',
+          message: 'This session is no longer valid. Please sign in again.',
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      if (!deviceRecord.isActive) {
         return reply.status(401).send({
           status: 'error',
           statusCode: 401,
           error: 'Unauthorized',
           code: 'DEVICE_REVOKED',
           message: 'This device session has been logged out because a new session was initiated on another device or revoked.',
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      if (deviceRecord.expiresAt.getTime() <= Date.now()) {
+        return reply.status(401).send({
+          status: 'error',
+          statusCode: 401,
+          error: 'Unauthorized',
+          code: 'SESSION_EXPIRED',
+          message: 'Your session has expired. Please sign in again.',
           timestamp: new Date().toISOString(),
         });
       }

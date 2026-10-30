@@ -459,21 +459,25 @@ export async function reviewLeaveRequest(
           : shiftEnd - shiftStart
       );
 
-      // 4. Create or update the single attendance row for this shift occurrence.
+      let attendanceId: string;
       if (!existingAttendance) {
-        await tx.insert(schema.employeeAttendance).values({
-          organizationId: row.leave.organizationId,
-          premisesId: row.leave.premisesId,
-          employeeId: row.leave.employeeId,
-          shiftAssignmentId: row.leave.shiftAssignmentId,
-          attendanceType: 'SHIFT',
-          workDate: row.leave.workDate,
-          status: 'LEAVE',
-          scheduledMinutes,
-          workedMinutes: 0,
-          statusUpdatedBy: actorUserId,
-          remarks: `Leave approved: ${row.leave.reason}`,
-        });
+        const [inserted] = await tx
+          .insert(schema.employeeAttendance)
+          .values({
+            organizationId: row.leave.organizationId,
+            premisesId: row.leave.premisesId,
+            employeeId: row.leave.employeeId,
+            shiftAssignmentId: row.leave.shiftAssignmentId,
+            attendanceType: 'SHIFT',
+            workDate: row.leave.workDate,
+            status: 'LEAVE',
+            scheduledMinutes,
+            workedMinutes: 0,
+            statusUpdatedBy: actorUserId,
+            remarks: `Leave approved: ${row.leave.reason}`,
+          })
+          .returning();
+        attendanceId = inserted.id;
       } else {
         await tx
           .update(schema.employeeAttendance)
@@ -485,6 +489,47 @@ export async function reviewLeaveRequest(
             updatedAt: new Date(),
           })
           .where(eq(schema.employeeAttendance.id, existingAttendance.id));
+        attendanceId = existingAttendance.id;
+      }
+
+      // If the shift end time has already passed, accrue leave pay earning immediately
+      const now = new Date();
+      const isOvernight = isOvernightShift(row.startTime, row.endTime);
+      const endDateStr = isOvernight
+        ? new Date(new Date(`${row.leave.workDate}T00:00:00Z`).getTime() + 86400000).toISOString().slice(0, 10)
+        : String(row.leave.workDate);
+      const shiftEndTimeIso = `${endDateStr}T${(row.endTime ?? '17:00:00').slice(0, 5)}:00`;
+      const shiftEndAt = new Date(shiftEndTimeIso);
+
+      if (now.getTime() >= shiftEndAt.getTime()) {
+        const leavePay = Number(assignment.leavePay ?? 0);
+        if (leavePay > 0) {
+          const [existingLedger] = await tx
+            .select({ id: schema.employeeEarningLedger.id })
+            .from(schema.employeeEarningLedger)
+            .where(
+              and(
+                eq(schema.employeeEarningLedger.employeeId, row.leave.employeeId),
+                eq(schema.employeeEarningLedger.earningDate, String(row.leave.workDate)),
+                eq(schema.employeeEarningLedger.type, 'SHIFT')
+              )
+            )
+            .limit(1);
+
+          if (!existingLedger) {
+            await tx.insert(schema.employeeEarningLedger).values({
+              organizationId: row.leave.organizationId,
+              premisesId: row.leave.premisesId,
+              employeeId: row.leave.employeeId,
+              earningDate: String(row.leave.workDate),
+              type: 'SHIFT',
+              amount: String(leavePay),
+              shiftAssignmentId: row.leave.shiftAssignmentId,
+              attendanceId: attendanceId,
+              sourceReference: `leave:${leaveRequestId}`,
+            } as any);
+          }
+        }
       }
 
       // 5. Update leave request to APPROVED.

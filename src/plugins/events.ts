@@ -1,6 +1,8 @@
 import fp from 'fastify-plugin';
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import fastifyWebsocket, { WebSocket } from '@fastify/websocket';
+import { eq } from 'drizzle-orm';
+import * as schema from '../db/schema.js';
 import {
   DOMAIN_EVENT_CHANNEL,
   DomainEvent,
@@ -13,8 +15,38 @@ interface WsClient {
   organizationId: string;
   role: 'OWNER' | 'MANAGER' | 'STAFF';
   premisesId?: string | null;
+  sessionJti: string;
   subscribedPremisesIds: Set<string>;
   socket: WebSocket;
+}
+
+/**
+ * A WebSocket handshake is authenticated once, but the underlying session can
+ * be revoked at any time (another device signs in, logout, reuse detection,
+ * expiry). Sockets are therefore revalidated against PostgreSQL on every
+ * heartbeat instead of trusting the JWT until it expires.
+ */
+async function isSessionStillActive(
+  fastify: FastifyInstance,
+  userId: string,
+  sessionJti: string
+): Promise<boolean> {
+  const [record] = await fastify.db
+    .select({
+      userId: schema.loggedDevices.userId,
+      isActive: schema.loggedDevices.isActive,
+      expiresAt: schema.loggedDevices.expiresAt,
+    })
+    .from(schema.loggedDevices)
+    .where(eq(schema.loggedDevices.sessionJti, sessionJti))
+    .limit(1);
+
+  return Boolean(
+    record &&
+      record.userId === userId &&
+      record.isActive &&
+      record.expiresAt.getTime() > Date.now()
+  );
 }
 
 declare module 'fastify' {
@@ -98,7 +130,7 @@ export default fp(async (fastify: FastifyInstance) => {
   fastify.get(
     '/api/v1/events/ws',
     { websocket: true },
-    (socket: WebSocket, request: FastifyRequest) => {
+    async (socket: WebSocket, request: FastifyRequest) => {
       const headerToken = request.headers.authorization?.replace(/^Bearer\s+/i, '');
       const queryToken = (request.query as { token?: string })?.token;
       const token = headerToken ?? queryToken;
@@ -108,16 +140,40 @@ export default fp(async (fastify: FastifyInstance) => {
         return;
       }
 
-      let payload: { userId: string; organizationId: string; role?: string; premisesId?: string };
+      let payload: {
+        userId: string;
+        organizationId: string;
+        role?: string;
+        premisesId?: string;
+        jti?: string;
+      };
       try {
         payload = fastify.jwt.verify<{
           userId: string;
           organizationId: string;
           role?: string;
           premisesId?: string;
+          jti?: string;
         }>(token);
       } catch {
         socket.close(4002, 'Unauthorized: Invalid token');
+        return;
+      }
+
+      if (!payload.jti) {
+        socket.close(4002, 'Unauthorized: Invalid session');
+        return;
+      }
+
+      try {
+        const active = await isSessionStillActive(fastify, payload.userId, payload.jti);
+        if (!active) {
+          socket.close(4003, 'Unauthorized: Session revoked or expired');
+          return;
+        }
+      } catch (err) {
+        fastify.log.warn({ err }, 'WebSocket session validation failed');
+        socket.close(1011, 'Session validation unavailable');
         return;
       }
 
@@ -128,6 +184,7 @@ export default fp(async (fastify: FastifyInstance) => {
         organizationId: payload.organizationId,
         role: clientRole,
         premisesId: payload.premisesId ?? null,
+        sessionJti: payload.jti,
         subscribedPremisesIds: new Set<string>(),
         socket,
       };
@@ -181,17 +238,34 @@ export default fp(async (fastify: FastifyInstance) => {
         }
       });
 
-      // Heartbeat / ping interval
+      // Heartbeat / ping interval. The session is revalidated on every beat so
+      // that revoking a device (or rotating/reusing a refresh token) also tears
+      // down an already-open socket.
       const pingInterval = setInterval(() => {
-        if (socket.readyState === 1 /* OPEN */) {
-          try {
-            socket.ping();
-          } catch {
-            clearInterval(pingInterval);
-          }
-        } else {
+        if (socket.readyState !== 1 /* OPEN */) {
           clearInterval(pingInterval);
+          return;
         }
+
+        void (async () => {
+          try {
+            const active = await isSessionStillActive(
+              fastify,
+              client.userId,
+              client.sessionJti
+            );
+            if (!active) {
+              clearInterval(pingInterval);
+              clients.delete(client);
+              socket.close(4003, 'Session revoked or expired');
+              return;
+            }
+            socket.ping();
+          } catch (err) {
+            // A transient database error must not drop healthy sockets.
+            fastify.log.warn({ err }, 'WebSocket heartbeat session check failed');
+          }
+        })();
       }, 30_000);
 
       socket.on('close', () => {

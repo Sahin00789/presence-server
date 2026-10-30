@@ -26,8 +26,17 @@ export const otpVerifySchema = z.object({
 });
 
 export const googleExchangeSchema = z.object({
-  code: z.string().min(1),
+  /**
+   * Google ID token from Android Credential Manager / GoogleSignIn.
+   * Recommended for the Android app: no client secret leaves the server.
+   */
+  idToken: z.string().min(1).optional(),
+  /** Google authorization code (browser redirect flow or Android `requestServerAuthCode`). */
+  code: z.string().min(1).optional(),
+  /** Browser flow only. Android `requestServerAuthCode` exchanges must send null. */
   redirectUri: z.string().url().nullable().optional(),
+  /** PKCE verifier, when the Android app generated a code challenge. */
+  codeVerifier: z.string().min(43).max(128).optional(),
   deviceName: z.string().optional(),
   deviceType: z.string().optional(),
   osName: z.string().optional(),
@@ -49,7 +58,7 @@ export const googleOwnerRegistrationSchema = z.object({
 });
 
 export const refreshTokenSchema = z.object({
-  refreshToken: z.string().min(10),
+  refreshToken: z.string().min(16).max(512),
   deviceName: z.string().optional(),
   deviceType: z.string().optional(),
   osName: z.string().optional(),

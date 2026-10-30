@@ -3,6 +3,7 @@ import { and, count, eq } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
 import { writeAuditLog } from '../../shared/services/audit.service.js';
+import { sendOrganizationWelcomeEmail } from '../../shared/services/mail.service.js';
 import {
   CreateOrganizationInput,
   Organization,
@@ -119,6 +120,31 @@ export async function createOrganization(
     resourceType: 'organization',
     resourceId: result.id,
     metadata: { name: result.name },
+  });
+
+  // Non-blocking asynchronous welcome email dispatch to Owner in background
+  setImmediate(() => {
+    fastify.db
+      .select({ email: schema.users.email, fullName: schema.users.fullName })
+      .from(schema.users)
+      .where(eq(schema.users.id, ownerUserId))
+      .limit(1)
+      .then(([ownerUser]) => {
+        if (ownerUser?.email) {
+          return sendOrganizationWelcomeEmail({
+            to: ownerUser.email,
+            ownerName: ownerUser.fullName,
+            organizationName: result.name,
+            premisesName: input.premisesName,
+            premisesAddress: input.premisesAddress,
+            radiusMeters: input.radiusMeters ?? 50,
+            logger: fastify.log,
+          });
+        }
+      })
+      .catch((err) => {
+        fastify.log.warn({ err, ownerUserId }, 'Failed to send organization welcome email');
+      });
   });
 
   return {

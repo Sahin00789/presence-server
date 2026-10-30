@@ -131,6 +131,12 @@ export const loggedDevices = pgTable('logged_devices', {
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   sessionJti: text('session_jti').notNull().unique(),
   refreshTokenHash: text('refresh_token_hash').notNull(),
+  /** Previous token kept only for the rotation-replay grace window / reuse detection. */
+  previousRefreshTokenHash: text('previous_refresh_token_hash'),
+  previousRotatedAt: timestamp('previous_rotated_at', { withTimezone: true }),
+  expiresAt: timestamp('expires_at', { withTimezone: true })
+    .notNull()
+    .default(sql`now() + interval '90 days'`),
   deviceName: text('device_name'),
   deviceType: text('device_type'),
   osName: text('os_name'),
@@ -140,9 +146,12 @@ export const loggedDevices = pgTable('logged_devices', {
   lastActiveAt: timestamp('last_active_at', { withTimezone: true }).notNull().defaultNow(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  revokedReason: text('revoked_reason'),
 }, (table) => [
   index('logged_devices_user_active_idx').on(table.userId, table.isActive),
   uniqueIndex('logged_devices_session_jti_idx').on(table.sessionJti),
+  index('logged_devices_refresh_hash_idx').on(table.refreshTokenHash),
+  index('logged_devices_previous_refresh_hash_idx').on(table.previousRefreshTokenHash),
 ]);
 
 // 6. Premises

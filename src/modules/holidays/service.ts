@@ -3,6 +3,7 @@ import { and, asc, eq, gte, lte, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
 import { writeAuditLog } from '../../shared/services/audit.service.js';
+import { postHolidayAndWeeklyOffEarnings } from '../../jobs/holidayWeeklyOffEarnings.js';
 
 export async function listHolidays(
   fastify: FastifyInstance,
@@ -39,7 +40,7 @@ export async function createHoliday(
   fastify: FastifyInstance,
   organizationId: string,
   actorUserId: string,
-  input: { name: string; date: string; isPaid: boolean; premisesId?: string }
+  input: { name: string; date: string; isPaid?: boolean; premisesId?: string }
 ) {
   if (input.premisesId) {
     const [premise] = await fastify.db
@@ -74,7 +75,7 @@ export async function createHoliday(
       organizationId,
       name: input.name,
       date: input.date,
-      isPaid: input.isPaid,
+      isPaid: input.isPaid ?? true,
       ...(input.premisesId ? { premisesId: input.premisesId } : {}),
     } as any)
     .returning();
@@ -87,6 +88,8 @@ export async function createHoliday(
     resourceId: created.id,
     metadata: { name: created.name, date: created.date },
   });
+
+  postHolidayAndWeeklyOffEarnings(fastify).catch(() => {});
 
   return {
     id: created.id,

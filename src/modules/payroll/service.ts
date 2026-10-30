@@ -119,7 +119,7 @@ export async function rebuildMonthlyAttendanceStats(
           eq(schema.overtime.employeeId, staff.id),
           gte(schema.overtime.workDate, startDate),
           sql`${schema.overtime.workDate} < ${nextMonthStartDate}`,
-          sql`${schema.overtime.status} IN ('APPROVED', 'COMPLETED', 'PAID', 'CLOSED')`
+          inArray(schema.overtime.status, ['APPROVED', 'IN_PROGRESS', 'COMPLETED'])
         )
       );
     const overtimeCount = overtimeRecords.length;
@@ -236,46 +236,72 @@ export async function generateDailyEarningLedgerEntries(
     const cents = (value: string | number | null | undefined) =>
       Math.round(Number(value ?? 0) * 100);
 
-    const insertLedgerIfMissing = async (values: {
+    // Load every ledger row already booked for this employee in the month
+    // once, instead of issuing a SELECT per candidate day/weekly-off/holiday.
+    const earningLedger = schema.employeeEarningLedger;
+    const existingLedgerRows = await fastify.db
+      .select({
+        sourceReference: earningLedger.sourceReference,
+        attendanceId: earningLedger.attendanceId,
+        overtimeId: earningLedger.overtimeId,
+        type: earningLedger.type,
+      })
+      .from(earningLedger)
+      .where(
+        and(
+          eq(earningLedger.employeeId, staffProfileId),
+          gte(earningLedger.earningDate, startDate),
+          sql`${earningLedger.earningDate} < ${nextMonthStartDate}`
+        )
+      );
+
+    const seenSourceReferences = new Set<string>();
+    const seenAttendanceEntries = new Set<string>();
+    const seenOvertimeEntries = new Set<string>();
+    for (const row of existingLedgerRows) {
+      if (row.sourceReference) seenSourceReferences.add(row.sourceReference);
+      if (row.attendanceId) seenAttendanceEntries.add(`${row.attendanceId}:${row.type}`);
+      if (row.overtimeId) seenOvertimeEntries.add(row.overtimeId);
+    }
+
+    type PendingEarning = {
       earningDate: string;
-      type: 'SHIFT' | 'HOLIDAY' | 'OFF_DAY';
+      type: 'SHIFT' | 'HOLIDAY' | 'OFF_DAY' | 'OVERTIME';
+      amount: string;
+      shiftAssignmentId: string | null;
+      attendanceId: string | null;
+      overtimeId: string | null;
+      sourceReference: string;
+    };
+    const pendingEarnings: PendingEarning[] = [];
+
+    const queueEarning = (values: {
+      earningDate: string;
+      type: 'SHIFT' | 'HOLIDAY' | 'OFF_DAY' | 'OVERTIME';
       amountCents: number;
       shiftAssignmentId?: string | null;
       attendanceId?: string | null;
+      overtimeId?: string | null;
       sourceReference: string;
     }) => {
-      const earningLedger = (schema as any).employeeEarningLedger;
-      const [existing] = await fastify.db
-        .select({ id: earningLedger.id })
-        .from(earningLedger)
-        .where(
-          values.attendanceId
-            ? or(
-                eq(earningLedger.sourceReference, values.sourceReference),
-                and(
-                  eq(earningLedger.attendanceId, values.attendanceId),
-                  eq(earningLedger.type, values.type)
-                )
-              )
-            : eq(earningLedger.sourceReference, values.sourceReference)
-        )
-        .limit(1);
-      if (existing) return;
+      const attendanceKey = values.attendanceId ? `${values.attendanceId}:${values.type}` : null;
+      if (values.overtimeId && seenOvertimeEntries.has(values.overtimeId)) return;
+      if (seenSourceReferences.has(values.sourceReference)) return;
+      if (attendanceKey && seenAttendanceEntries.has(attendanceKey)) return;
 
-      await fastify.db
-        .insert(earningLedger)
-        .values({
-          organizationId,
-          premisesId,
-          employeeId: staffProfileId,
-          earningDate: values.earningDate,
-          type: values.type,
-          amount: (Math.max(0, values.amountCents) / 100).toFixed(2),
-          shiftAssignmentId: values.shiftAssignmentId ?? null,
-          attendanceId: values.attendanceId ?? null,
-          sourceReference: values.sourceReference,
-        })
-        .onConflictDoNothing();
+      seenSourceReferences.add(values.sourceReference);
+      if (attendanceKey) seenAttendanceEntries.add(attendanceKey);
+      if (values.overtimeId) seenOvertimeEntries.add(values.overtimeId);
+
+      pendingEarnings.push({
+        earningDate: values.earningDate,
+        type: values.type,
+        amount: (Math.max(0, values.amountCents) / 100).toFixed(2),
+        shiftAssignmentId: values.shiftAssignmentId ?? null,
+        attendanceId: values.attendanceId ?? null,
+        overtimeId: values.overtimeId ?? null,
+        sourceReference: values.sourceReference,
+      });
     };
 
     const workedDates = new Set<string>();
@@ -300,7 +326,7 @@ export async function generateDailyEarningLedgerEntries(
           ? cents(assignment?.halfDayPay) || Math.round((cents(assignment?.presentPay) || dailyPresentCents) / 2)
           : cents(assignment?.presentPay) || dailyPresentCents || fallbackDailyCents;
 
-      await insertLedgerIfMissing({
+      queueEarning({
         earningDate: workDate,
         type: 'SHIFT',
         amountCents,
@@ -371,7 +397,7 @@ export async function generateDailyEarningLedgerEntries(
       holidayDates.add(holidayDate);
       if (!holiday.isPaid || workedDates.has(holidayDate)) continue;
 
-      await insertLedgerIfMissing({
+      queueEarning({
         earningDate: holidayDate,
         type: 'HOLIDAY',
         amountCents: resolveUnworkedCents(
@@ -399,7 +425,7 @@ export async function generateDailyEarningLedgerEntries(
         continue;
       }
 
-      await insertLedgerIfMissing({
+      queueEarning({
         earningDate: date,
         type: 'OFF_DAY',
         amountCents: resolveUnworkedCents(
@@ -422,7 +448,7 @@ export async function generateDailyEarningLedgerEntries(
       const assignment = ev.shiftAssignmentId
         ? assignmentById.get(ev.shiftAssignmentId)
         : undefined;
-      await insertLedgerIfMissing({
+      queueEarning({
         earningDate: workDate,
         type: 'SHIFT',
         amountCents: resolveUnworkedCents(
@@ -446,36 +472,35 @@ export async function generateDailyEarningLedgerEntries(
           eq(schema.overtime.employeeId, staffProfileId),
           gte(schema.overtime.workDate, startDate),
           sql`${schema.overtime.workDate} < ${nextMonthStartDate}`,
-          sql`${schema.overtime.status} IN ('APPROVED', 'COMPLETED', 'PAID', 'CLOSED')`
+          inArray(schema.overtime.status, ['APPROVED', 'IN_PROGRESS', 'COMPLETED'])
         )
       );
 
-    const earningLedger = (schema as any).employeeEarningLedger;
     for (const ot of overtimeRecords) {
-      const [existing] = await fastify.db
-        .select({ id: earningLedger.id })
-        .from(earningLedger)
-        .where(
-          and(
-            eq(earningLedger.overtimeId, ot.id),
-            eq(earningLedger.type, 'OVERTIME')
-          )
-        )
-        .limit(1);
-
-      if (existing) continue;
-
       const otAmountCents = Number((ot as any).paymentCents ?? (ot as any).paymentInr ?? 0);
-      await fastify.db.insert(earningLedger).values({
-        organizationId,
-        premisesId,
-        employeeId: staffProfileId,
+      queueEarning({
         earningDate: ot.workDate,
         type: 'OVERTIME',
-        amount: (otAmountCents / 100).toFixed(2),
+        amountCents: otAmountCents,
         overtimeId: ot.id,
         sourceReference: `overtime:${ot.id}:OVERTIME`,
       });
+    }
+
+    // Single batched insert keeps the ledger idempotent without one round trip
+    // per entry (a month of weekly offs alone was ~30 SELECT + 30 INSERT).
+    if (pendingEarnings.length > 0) {
+      await fastify.db
+        .insert(earningLedger)
+        .values(
+          pendingEarnings.map((earning) => ({
+            organizationId,
+            premisesId,
+            employeeId: staffProfileId,
+            ...earning,
+          }))
+        )
+        .onConflictDoNothing();
     }
   } catch (err) {
     fastify.log.warn({ err, staffProfileId }, 'Failed to generate earning ledger entries');

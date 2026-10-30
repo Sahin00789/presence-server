@@ -19,4 +19,34 @@ describe('Google exchange request schema', () => {
 
     expect(parsed.success).toBe(false);
   });
+
+  it('accepts an Android ID token without a code', () => {
+    const parsed = googleExchangeSchema.safeParse({
+      idToken: 'google-id-token',
+      deviceName: 'Pixel 8',
+      deviceType: 'android',
+      osName: 'Android 15',
+    });
+
+    expect(parsed.success).toBe(true);
+  });
+
+  it('accepts a server-auth-code exchange with a PKCE verifier and no redirect URI', () => {
+    const parsed = googleExchangeSchema.safeParse({
+      code: 'authorization-code',
+      codeVerifier: 'a'.repeat(43),
+    });
+
+    expect(parsed.success).toBe(true);
+  });
+
+  it('rejects a PKCE verifier shorter than the RFC 7636 minimum', () => {
+    const parsed = googleExchangeSchema.safeParse({
+      code: 'authorization-code',
+      codeVerifier: 'too-short',
+    });
+
+    expect(parsed.success).toBe(false);
+  });
 });
+

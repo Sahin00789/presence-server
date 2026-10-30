@@ -211,6 +211,7 @@ export async function getDashboardSummary(
       presentToday: countFor(['PRESENT', 'LATE', 'HALF_DAY']),
       lateToday: countFor(['LATE']),
       absentToday: countFor(['ABSENT']),
+      leaveToday: countFor(['LEAVE', 'ON_LEAVE', 'PAID_LEAVE']),
       openExceptions: Number(openExceptions?.count ?? 0),
       pendingLeaveRequests: Number(pendingLeave?.count ?? 0),
       latestPayrollPeriod: latest
@@ -219,7 +220,7 @@ export async function getDashboardSummary(
             status: latest.status,
             startDate: `${latest.year}-${String(latest.month).padStart(2, '0')}-01`,
             endDate: `${latest.year}-${String(latest.month).padStart(2, '0')}-${new Date(latest.year, latest.month, 0).getDate()}`,
-            netSalaryCents: Math.round(Number(latest.dueAmount) * 100),
+            netSalaryPaise: Math.round(Number(latest.dueAmount) * 100),
           }
         : null,
     },

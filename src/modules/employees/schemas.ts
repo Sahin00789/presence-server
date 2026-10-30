@@ -32,9 +32,9 @@ export const employeeDtoSchema = z.object({
   premisesName: z.string().nullable().optional(),
   hireDate: z.string(),
   isActive: z.boolean(),
-  earnedBalanceCents: z.number().int(),
-  approvedUnpaidBalanceCents: z.number().int(),
-  paidBalanceCents: z.number().int(),
+  earnedBalancePaise: z.number().int(),
+  approvedUnpaidBalancePaise: z.number().int(),
+  paidBalancePaise: z.number().int(),
 });
 
 

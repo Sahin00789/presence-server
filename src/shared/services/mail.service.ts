@@ -342,3 +342,312 @@ export async function sendUserCreationEmail(params: SendUserCreationEmailParams)
 }
 
 export const sendInvitationEmail = sendUserCreationEmail;
+
+export interface SendOrganizationWelcomeEmailParams {
+  to: string;
+  ownerName: string;
+  organizationName: string;
+  premisesName?: string;
+  premisesAddress?: string;
+  radiusMeters?: number;
+  logger?: {
+    info: (...args: any[]) => void;
+    warn: (...args: any[]) => void;
+    error: (...args: any[]) => void;
+  };
+}
+
+export async function sendOrganizationWelcomeEmail(params: SendOrganizationWelcomeEmailParams): Promise<boolean> {
+  const mailTransporter = getTransporter();
+
+  if (!mailTransporter) {
+    if (params.logger) {
+      params.logger.warn(
+        { to: params.to },
+        '[MailService] SMTP credentials not configured. Skipping organization welcome email.'
+      );
+    }
+    return false;
+  }
+
+  const subject = `Welcome to Presence! ${params.organizationName} workspace created`;
+
+  const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${subject}</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f8fafc;
+      margin: 0;
+      padding: 0;
+      color: #1e293b;
+    }
+    .container {
+      max-width: 580px;
+      margin: 40px auto;
+      background: #ffffff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+      border: 1px solid #e2e8f0;
+    }
+    .header {
+      background-color: #0f172a;
+      color: #ffffff;
+      padding: 32px 28px;
+      text-align: center;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+    .content {
+      padding: 32px 28px;
+    }
+    .card {
+      background-color: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 18px 20px;
+      margin: 20px 0;
+    }
+    .card-item {
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+    .card-item:last-child {
+      margin-bottom: 0;
+    }
+    .steps {
+      margin-top: 24px;
+    }
+    .step-item {
+      margin-bottom: 12px;
+      font-size: 14px;
+    }
+    .footer {
+      background-color: #f1f5f9;
+      padding: 20px;
+      text-align: center;
+      font-size: 12px;
+      color: #64748b;
+      border-top: 1px solid #e2e8f0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Presence</h1>
+    </div>
+    <div class="content">
+      <h2>Welcome, ${params.ownerName}! 🎉</h2>
+      <p>Your business workspace <strong>${params.organizationName}</strong> has been successfully created on Presence.</p>
+
+      ${params.premisesName ? `
+      <div class="card">
+        <div class="card-item"><strong>Primary Premises:</strong> ${params.premisesName}</div>
+        ${params.premisesAddress ? `<div class="card-item"><strong>Address:</strong> ${params.premisesAddress}</div>` : ''}
+        <div class="card-item"><strong>GPS Geofence Radius:</strong> ${params.radiusMeters ?? 50} metres</div>
+      </div>
+      ` : ''}
+
+      <div class="steps">
+        <h3>Next steps to get started:</h3>
+        <div class="step-item">1. <strong>Add Managers:</strong> Assign managers to handle daily premises operations and staff.</div>
+        <div class="step-item">2. <strong>Enroll Staff:</strong> Perform face verification enrollment for your premises staff.</div>
+        <div class="step-item">3. <strong>Configure Shifts:</strong> Set up shift schedules, pay rates, and automated attendance rules.</div>
+      </div>
+    </div>
+    <div class="footer">
+      <p>&copy; ${new Date().getFullYear()} Presence Staff & Attendance Management. All rights reserved.</p>
+    </div>
+  </div>
+</body>
+</html>
+  `;
+
+  const text = `Welcome to Presence, ${params.ownerName}!\n\nYour workspace ${params.organizationName} has been created successfully.${params.premisesName ? `\nPrimary Premises: ${params.premisesName}` : ''}\n\nSign in to the Presence app to start managing staff, shifts, and attendance.`;
+
+  try {
+    const info = await mailTransporter.sendMail({
+      from: env.SMTP_FROM,
+      to: params.to,
+      subject,
+      text,
+      html,
+    });
+
+    if (params.logger) {
+      params.logger.info(
+        { messageId: info.messageId, to: params.to },
+        '[MailService] Organization welcome email sent successfully'
+      );
+    }
+    return true;
+  } catch (err) {
+    if (params.logger) {
+      params.logger.error({ err, to: params.to }, '[MailService] Failed to send organization welcome email');
+    }
+    return false;
+  }
+}
+
+export interface SendMonthlyReportEmailParams {
+  to: string;
+  recipientName: string;
+  role: 'OWNER' | 'MANAGER' | 'STAFF';
+  organizationName: string;
+  month: number;
+  year: number;
+  pdfBuffer?: Buffer;
+  csvContent?: string;
+  logger?: {
+    info: (...args: any[]) => void;
+    warn: (...args: any[]) => void;
+    error: (...args: any[]) => void;
+  };
+}
+
+export async function sendMonthlyReportEmail(params: SendMonthlyReportEmailParams): Promise<boolean> {
+  const mailTransporter = getTransporter();
+
+  if (!mailTransporter) {
+    if (params.logger) {
+      params.logger.warn(
+        { to: params.to },
+        '[MailService] SMTP credentials not configured. Skipping monthly report email.'
+      );
+    }
+    return false;
+  }
+
+  const monthName = new Date(params.year, params.month - 1, 1).toLocaleString('en-US', { month: 'long' });
+  const subject = `Monthly ${params.role} Summary Report - ${monthName} ${params.year} (${params.organizationName})`;
+
+  const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${subject}</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f8fafc;
+      margin: 0;
+      padding: 0;
+      color: #1e293b;
+    }
+    .container {
+      max-width: 580px;
+      margin: 40px auto;
+      background: #ffffff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+      border: 1px solid #e2e8f0;
+    }
+    .header {
+      background-color: #0f172a;
+      color: #ffffff;
+      padding: 28px;
+      text-align: center;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+    }
+    .content {
+      padding: 28px;
+    }
+    .badge {
+      display: inline-block;
+      background-color: #e0f2fe;
+      color: #0369a1;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 13px;
+    }
+    .footer {
+      background-color: #f1f5f9;
+      padding: 16px;
+      text-align: center;
+      font-size: 12px;
+      color: #64748b;
+      border-top: 1px solid #e2e8f0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Presence Reports</h1>
+    </div>
+    <div class="content">
+      <h2>Hello, ${params.recipientName} 👋</h2>
+      <p>Your monthly <strong>${params.role}</strong> summary report for <strong>${monthName} ${params.year}</strong> is attached to this email.</p>
+      <p><strong>Organization:</strong> ${params.organizationName}</p>
+      <p>The report includes complete attendance, shift, and payroll statements in PDF and Excel (CSV) formats.</p>
+    </div>
+    <div class="footer">
+      <p>&copy; ${new Date().getFullYear()} Presence Staff & Attendance Management. All rights reserved.</p>
+    </div>
+  </div>
+</body>
+</html>
+  `;
+
+  const attachments: Array<{ filename: string; content: Buffer | string; contentType: string }> = [];
+  const fileStamp = `${params.year}-${String(params.month).padStart(2, '0')}`;
+
+  if (params.pdfBuffer) {
+    attachments.push({
+      filename: `Monthly-Report-${params.role}-${fileStamp}.pdf`,
+      content: params.pdfBuffer,
+      contentType: 'application/pdf',
+    });
+  }
+
+  if (params.csvContent) {
+    attachments.push({
+      filename: `Monthly-Report-${params.role}-${fileStamp}.csv`,
+      content: params.csvContent,
+      contentType: 'text/csv; charset=utf-8',
+    });
+  }
+
+  try {
+    const info = await mailTransporter.sendMail({
+      from: env.SMTP_FROM,
+      to: params.to,
+      subject,
+      text: `Hello ${params.recipientName},\n\nYour monthly ${params.role} summary report for ${monthName} ${params.year} at ${params.organizationName} is attached in PDF and Excel formats.`,
+      html,
+      attachments,
+    });
+
+    if (params.logger) {
+      params.logger.info(
+        { messageId: info.messageId, to: params.to, role: params.role },
+        '[MailService] Monthly report email sent successfully'
+      );
+    }
+    return true;
+  } catch (err) {
+    if (params.logger) {
+      params.logger.error({ err, to: params.to }, '[MailService] Failed to send monthly report email');
+    }
+    return false;
+  }
+}

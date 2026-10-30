@@ -17,7 +17,7 @@ import {
   resolveShiftWindow,
   toDateISOInTimeZone,
 } from '../../shared/utils/datetime.js';
-import { buildSchedule, resolveTimezone } from '../shifts/service.js';
+import { buildSchedule, getAssignedDayNumbers, resolveTimezone } from '../shifts/service.js';
 import { writeAuditLog } from '../../shared/services/audit.service.js';
 
 import {
@@ -162,6 +162,8 @@ export function resolveClockOutResult(input: {
   const status: AttendanceStatus =
     input.workedMinutes < input.halfDayThresholdMinutes
       ? 'HALF_DAY'
+      : (input.existingStatus as string) === 'LATE'
+      ? ('LATE' as AttendanceStatus)
       : 'PRESENT';
 
   return {
@@ -177,8 +179,8 @@ export function resolveClockOutResult(input: {
   };
 }
 
-export function isPendingReview(status: AttendanceStatus): boolean {
-  return false;
+export function isPendingReview(status: string): boolean {
+  return status === 'SCHEDULED';
 }
 
 export function resolveFinalShiftStatus(input: {
@@ -215,12 +217,13 @@ async function resolveShiftForClockIn(
   now: Date,
   timezone: string
 ): Promise<ResolvedShift> {
-  const [assignment] = await fastify.db
+  const assignments = await fastify.db
     .select({
       assignmentId: schema.employeeShiftAssignments.id,
       startTime: schema.shifts.startTime,
       endTime: schema.shifts.endTime,
       halfDayThreshold: schema.shifts.halfDayThreshold,
+      dayName: schema.shifts.dayName,
     })
     .from(schema.employeeShiftAssignments)
     .innerJoin(
@@ -233,10 +236,9 @@ async function resolveShiftForClockIn(
         eq(schema.employeeShiftAssignments.organizationId, organizationId),
         eq(schema.employeeShiftAssignments.isActive, true)
       )
-    )
-    .limit(1);
+    );
 
-  if (!assignment) {
+  if (assignments.length === 0) {
     throw new AppError(
       'No active shift is assigned to this employee.',
       400,
@@ -245,38 +247,71 @@ async function resolveShiftForClockIn(
   }
 
   const today = toDateISOInTimeZone(now, timezone);
-  const todayWindow = resolveShiftWindow(
-    today,
-    assignment.startTime,
-    assignment.endTime,
-    0,
-    timezone
+  const todayDow = new Date(`${today}T00:00:00Z`).getUTCDay();
+
+  let selectedAssignment: typeof assignments[0] | null = null;
+  let workDate = today;
+
+  // 1. Check if an assignment applies to today
+  const todayMatch = assignments.find((a) =>
+    getAssignedDayNumbers(a.dayName).includes(todayDow)
   );
 
-  let workDate = today;
-  if (
-    isOvernightShift(assignment.startTime, assignment.endTime) &&
-    now.getTime() < todayWindow.startAt.getTime()
-  ) {
+  if (todayMatch) {
+    selectedAssignment = todayMatch;
+    workDate = today;
+  } else {
+    // 2. Check if yesterday's assignment was overnight and is still active right now
     const yesterday = addDays(today, -1);
-    const yesterdayWindow = resolveShiftWindow(
-      yesterday,
-      assignment.startTime,
-      assignment.endTime,
-      0,
-      timezone
+    const yestDow = new Date(`${yesterday}T00:00:00Z`).getUTCDay();
+    const yestMatch = assignments.find((a) =>
+      getAssignedDayNumbers(a.dayName).includes(yestDow)
     );
-    if (
-      now.getTime() >= yesterdayWindow.startAt.getTime() &&
-      now.getTime() <= yesterdayWindow.endAt.getTime()
-    ) {
-      workDate = yesterday;
+    if (yestMatch && isOvernightShift(yestMatch.startTime, yestMatch.endTime)) {
+      const yestWindow = resolveShiftWindow(
+        yesterday,
+        yestMatch.startTime,
+        yestMatch.endTime,
+        0,
+        timezone
+      );
+      if (
+        now.getTime() >= yestWindow.startAt.getTime() &&
+        now.getTime() <= yestWindow.endAt.getTime()
+      ) {
+        selectedAssignment = yestMatch;
+        workDate = yesterday;
+      }
     }
   }
 
+  // 3. If still no assignment found for today or overnight yesterday, look ahead for future days (1..7)
+  if (!selectedAssignment) {
+    for (let d = 1; d <= 7; d++) {
+      const futureDate = addDays(today, d);
+      const futureDow = new Date(`${futureDate}T00:00:00Z`).getUTCDay();
+      const futureMatch = assignments.find((a) =>
+        getAssignedDayNumbers(a.dayName).includes(futureDow)
+      );
+      if (futureMatch) {
+        selectedAssignment = futureMatch;
+        workDate = futureDate;
+        break;
+      }
+    }
+  }
+
+  const assignment = selectedAssignment || assignments[0];
+
   const window =
     workDate === today
-      ? todayWindow
+      ? resolveShiftWindow(
+          today,
+          assignment.startTime,
+          assignment.endTime,
+          0,
+          timezone
+        )
       : resolveShiftWindow(
           workDate,
           assignment.startTime,
@@ -1325,6 +1360,8 @@ export async function buildAttendanceSummary(
         presentDays += 1;
       } else if (event.status === 'HALF_DAY') {
         halfDays += 1;
+      } else if (event.status === 'ABSENT') {
+        absentDays += 1;
       }
       continue;
     }
@@ -1334,9 +1371,10 @@ export async function buildAttendanceSummary(
     }
   }
 
-  const leaveDayCount = schedule.filter(
-    (entry) => entry.type === 'SHIFT' && leaveDates.has(entry.date)
-  ).length;
+  const leaveDayCount = Math.max(
+    events.filter((e) => e.status === 'LEAVE').length,
+    schedule.filter((entry) => entry.type === 'SHIFT' && leaveDates.has(entry.date)).length
+  );
 
   return {
     totalDays: schedule.length,

@@ -29,6 +29,7 @@ export const dashboardSummarySchema = z.object({
     presentToday: z.number().int().optional(),
     lateToday: z.number().int().optional(),
     absentToday: z.number().int().optional(),
+    leaveToday: z.number().int().optional(),
     openExceptions: z.number().int().optional(),
     pendingLeaveRequests: z.number().int().optional(),
     latestPayrollPeriod: z
@@ -37,7 +38,7 @@ export const dashboardSummarySchema = z.object({
         status: z.string(),
         startDate: z.string(),
         endDate: z.string(),
-        netSalaryCents: z.number().int(),
+        netSalaryPaise: z.number().int(),
       })
       .nullable()
       .optional(),

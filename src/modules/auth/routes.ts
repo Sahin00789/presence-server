@@ -32,10 +32,16 @@ import {
 export async function authRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
+  // Auth endpoints are public, so they are limited per IP (credential stuffing,
+  // OTP spamming and brute force all land here).
+  const authRateLimit = (bucket: string, limit: number) =>
+    fastify.rateLimit({ bucket, limit, windowSeconds: 60 });
+
   // Request Email OTP Route
   server.post(
     '/api/v1/auth/otp/request',
     {
+      preHandler: [authRateLimit('auth:otp:request', 5)],
       schema: {
         description: 'Requests a 6-digit email OTP. In development, includes devOtp in the response payload.',
         tags: ['Auth'],
@@ -55,6 +61,7 @@ export async function authRoutes(fastify: FastifyInstance) {
   server.post(
     '/api/v1/auth/otp/verify',
     {
+      preHandler: [authRateLimit('auth:otp:verify', 10)],
       schema: {
         description: 'Verifies the 6-digit email OTP code and authenticates the user',
         tags: ['Auth'],
@@ -78,8 +85,10 @@ export async function authRoutes(fastify: FastifyInstance) {
   server.post(
     '/api/v1/auth/google/exchange',
     {
+      preHandler: [authRateLimit('auth:google:exchange', 10)],
       schema: {
-        description: 'Exchanges Google authorization code for JWT application tokens',
+        description:
+          'Signs in with Google. Accepts an Android ID token (idToken) or an authorization code (code), returns app JWTs',
         tags: ['Auth'],
         body: googleExchangeSchema,
         response: {
@@ -100,6 +109,7 @@ export async function authRoutes(fastify: FastifyInstance) {
   server.post(
     '/api/v1/auth/google/owner-registration',
     {
+      preHandler: [authRateLimit('auth:google:owner-registration', 5)],
       schema: {
         description: 'Verifies a Google identity and creates an owner organization',
         tags: ['Auth'],
@@ -123,6 +133,7 @@ export async function authRoutes(fastify: FastifyInstance) {
   server.post(
     '/api/v1/auth/refresh',
     {
+      preHandler: [authRateLimit('auth:refresh', 30)],
       schema: {
         description: 'Rotates refresh token and issues a new access token',
         tags: ['Auth'],

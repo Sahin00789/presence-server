@@ -10,9 +10,26 @@ const envSchema = z.object({
 
   DATABASE_URL: z.string().url(),
 
+  /** Web OAuth client ID. Android apps pass this as `serverClientId`, so ID tokens carry it as `aud`. */
   GOOGLE_WEB_CLIENT_ID: z.string().min(1),
-  GOOGLE_WEB_CLIENT_SECRET: z.string().min(1),
-  GOOGLE_REDIRECT_URI: z.string().url(),
+  /** Only needed for the authorization-code flow; installed/Android clients have no secret. */
+  GOOGLE_WEB_CLIENT_SECRET: z.preprocess(
+    (val) => (typeof val === 'string' && val.trim() === '' ? undefined : val),
+    z.string().min(1).optional()
+  ),
+  /**
+   * Only used by the browser redirect flow. Android `requestServerAuthCode` exchanges
+   * must omit it, so it stays optional.
+   */
+  GOOGLE_REDIRECT_URI: z.string().url().optional(),
+  /**
+   * Additional client IDs whose ID tokens are accepted, comma separated.
+   * Android/installed OAuth clients have no secret, so they belong here.
+   */
+  GOOGLE_EXTRA_CLIENT_IDS: z.preprocess(
+    (val) => (typeof val === 'string' && val.trim() === '' ? undefined : val),
+    z.string().min(1).optional()
+  ),
 
   ACCESS_TOKEN_SECRET: z.string().min(32),
   REFRESH_TOKEN_SECRET: z.string().min(32),
@@ -25,9 +42,9 @@ const envSchema = z.object({
   /** Minimum normalised Laplacian texture score accepted as passive liveness. */
   FACE_PASSIVE_LIVENESS_MIN: z.coerce.number().min(0).max(1).default(0.2),
 
-  CLOUDINARY_CLOUD_NAME: z.string().default('dhhzoshz7'),
-  CLOUDINARY_API_KEY: z.string().default('743661874227473'),
-  CLOUDINARY_API_SECRET: z.string().default('MtTKUL3LUHGOWWrnBx7Ruz6_P3I'),
+  CLOUDINARY_CLOUD_NAME: z.string().min(1),
+  CLOUDINARY_API_KEY: z.string().min(1),
+  CLOUDINARY_API_SECRET: z.string().min(1),
 
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().default(587),

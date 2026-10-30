@@ -10,7 +10,6 @@ async function getUnworkedPaymentAmount(
   employeeId: string,
   dayType: 'HOLIDAY' | 'WEEKLY_OFF'
 ): Promise<number> {
-  const todayIso = toDateISO(new Date());
   const [rule] = await fastify.db
     .select()
     .from(schema.unworkedPaymentRules)
@@ -29,10 +28,27 @@ async function getUnworkedPaymentAmount(
     )
     .limit(1);
 
-  if (!rule) {
-    return 0;
+  if (rule) {
+    const amt = Number((rule as any).paymentInr ?? (rule as any).paymentPaise ?? 0);
+    if (amt > 0) return amt;
   }
-  return Number((rule as any).paymentInr ?? (rule as any).paymentCents ?? 0);
+
+  const [assignment] = await fastify.db
+    .select({ presentPay: schema.employeeShiftAssignments.presentPay })
+    .from(schema.employeeShiftAssignments)
+    .where(
+      and(
+        eq(schema.employeeShiftAssignments.employeeId, employeeId),
+        eq(schema.employeeShiftAssignments.isActive, true)
+      )
+    )
+    .limit(1);
+
+  if (assignment && Number(assignment.presentPay) > 0) {
+    return Number(assignment.presentPay);
+  }
+
+  return 0;
 }
 
 export async function postHolidayAndWeeklyOffEarnings(
@@ -40,8 +56,8 @@ export async function postHolidayAndWeeklyOffEarnings(
   now: Date = new Date()
 ): Promise<{ holidays: number; weeklyOffs: number }> {
   const today = toDateISO(now);
-  const from = addDays(today, -7);
-  const to = addDays(today, 1);
+  const from = addDays(today, -14);
+  const to = today;
 
   let holidays = 0;
   let weeklyOffs = 0;
@@ -79,7 +95,12 @@ export async function postHolidayAndWeeklyOffEarnings(
 
       const holidayKey = `${emp.organizationId}::${date}`;
       const holiday = holidayByOrgDate.get(holidayKey);
+
       if (holiday) {
+        if (holiday.isPaid === false) {
+          continue;
+        }
+
         const existing = await fastify.db
           .select({ id: schema.employeeEarningLedger.id })
           .from(schema.employeeEarningLedger)
@@ -163,7 +184,7 @@ export function startHolidayWeeklyOffEarningsJob(fastify: FastifyInstance): void
 
   fastify.addHook('onListen', async () => {
     setTimeout(run, 2000);
-    timer = setInterval(run, 12 * 60 * 60 * 1000);
+    timer = setInterval(run, 5 * 60 * 1000);
     timer.unref?.();
   });
 

@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import {
   evaluateGeofence,
@@ -14,8 +14,8 @@ import {
   listOwnerUserIds,
   resolveNotificationTargets,
 } from '../../shared/services/staff.service.js';
-import { toDateISOInTimeZone } from '../../shared/utils/datetime.js';
-import { resolveTimezone } from '../shifts/service.js';
+import { addDays, toDateISOInTimeZone } from '../../shared/utils/datetime.js';
+import { getAssignedDayNumbers, resolveTimezone } from '../shifts/service.js';
 import {
   GpsPingSummary,
   LocationStaffCard,
@@ -395,7 +395,7 @@ export async function getActiveLocationSession(
         eq(schema.employeeAttendance.employeeId, profile.id),
         isNull(schema.employeeAttendance.clockOutAt),
         sql`${schema.employeeAttendance.clockInAt} IS NOT NULL`,
-        sql`${schema.employeeAttendance.status} NOT IN ('SCHEDULED', 'ABSENT', 'LEAVE', 'HOLIDAY', 'WEEKLY_OFF')`
+        inArray(schema.employeeAttendance.status, ['PRESENT', 'HALF_DAY'])
       )
     )
     .orderBy(desc(schema.employeeAttendance.clockInAt))
@@ -526,15 +526,14 @@ export async function getTodayLocationPresence(
     const overtimeEvent =
       attendanceRows.find((row) => row.attendanceType === 'OVERTIME') ?? null;
 
-    let shiftStart: string | null = null;
-    let shiftEnd: string | null = null;
-    let shiftName = 'No shift assigned';
-
-    const [assignment] = await fastify.db
+    // Fetch all active shift assignments for this staff member
+    const allAssignments = await fastify.db
       .select({
         shiftName: schema.shifts.shiftName,
         startTime: schema.shifts.startTime,
         endTime: schema.shifts.endTime,
+        dayName: schema.shifts.dayName,
+        presentPay: schema.employeeShiftAssignments.presentPay,
       })
       .from(schema.employeeShiftAssignments)
       .innerJoin(
@@ -547,15 +546,45 @@ export async function getTodayLocationPresence(
           eq(schema.employeeShiftAssignments.organizationId, organizationId),
           eq(schema.employeeShiftAssignments.isActive, true)
         )
-      )
-      .limit(1);
+      );
 
-    if (assignment) {
-      shiftName = assignment.shiftName;
-      shiftStart = String(assignment.startTime);
-      shiftEnd = String(assignment.endTime);
+    let scheduledShift: {
+      shiftName: string;
+      startTime: string;
+      endTime: string;
+      presentPay: string | null;
+      dayOfWeekStr: string;
+      workDate: string;
+    } | null = null;
+
+    for (let d = 0; d < 7; d++) {
+      const checkDateStr = addDays(targetDate, d);
+      const checkDateObj = new Date(`${checkDateStr}T00:00:00Z`);
+      const checkDow = checkDateObj.getUTCDay();
+      const checkDayName = dayNames[checkDow] ?? 'Monday';
+
+      const match = allAssignments.find((a) =>
+        getAssignedDayNumbers(a.dayName).includes(checkDow)
+      );
+
+      if (match) {
+        scheduledShift = {
+          shiftName: match.shiftName,
+          startTime: String(match.startTime),
+          endTime: String(match.endTime),
+          presentPay: match.presentPay ? String(match.presentPay) : null,
+          dayOfWeekStr: checkDayName,
+          workDate: checkDateStr,
+        };
+        break;
+      }
     }
 
+    let shiftStart: string | null = scheduledShift?.startTime ?? null;
+    let shiftEnd: string | null = scheduledShift?.endTime ?? null;
+    let shiftName = scheduledShift?.shiftName ?? 'No shift assigned';
+
+    // Fetch approved/in-progress overtime for targetDate or future days
     const [overtimeRecord] = await fastify.db
       .select()
       .from(schema.overtime)
@@ -563,10 +592,57 @@ export async function getTodayLocationPresence(
         and(
           eq(schema.overtime.organizationId, organizationId),
           eq(schema.overtime.employeeId, staff.id),
-          eq(schema.overtime.workDate, targetDate)
+          gte(schema.overtime.workDate, targetDate),
+          inArray(schema.overtime.status, ['APPROVED', 'IN_PROGRESS', 'COMPLETED'])
         )
       )
+      .orderBy(schema.overtime.workDate, schema.overtime.startTime)
       .limit(1);
+
+    let overtimeDayOfWeekStr = dayOfWeekStr;
+    if (overtimeRecord) {
+      const otDateObj = new Date(`${overtimeRecord.workDate}T00:00:00Z`);
+      overtimeDayOfWeekStr = dayNames[otDateObj.getUTCDay()] ?? dayOfWeekStr;
+    }
+
+    // Determine card display day of week:
+    // If overtime exists and starts earlier than scheduled shift (or if no shift is scheduled), use overtime's day of week.
+    let cardDayOfWeek = dayOfWeekStr;
+    if (scheduledShift) {
+      cardDayOfWeek = scheduledShift.dayOfWeekStr;
+    }
+    if (overtimeRecord) {
+      const otStartKey = `${overtimeRecord.workDate}T${overtimeRecord.startTime}`;
+      const shiftStartKey = scheduledShift ? `${scheduledShift.workDate}T${scheduledShift.startTime}` : '9999-99-99T99:99:99';
+      if (otStartKey < shiftStartKey) {
+        cardDayOfWeek = overtimeDayOfWeekStr;
+      }
+    }
+
+    const ledgerEntries = await fastify.db
+      .select({ amount: schema.employeeEarningLedger.amount })
+      .from(schema.employeeEarningLedger)
+      .where(
+        and(
+          eq(schema.employeeEarningLedger.organizationId, organizationId),
+          eq(schema.employeeEarningLedger.employeeId, staff.id),
+          eq(schema.employeeEarningLedger.earningDate, targetDate)
+        )
+      );
+
+    let earnedAmountPaise = ledgerEntries.reduce(
+      (sum, entry) => sum + Number(entry.amount || 0),
+      0
+    );
+
+    if (earnedAmountPaise === 0) {
+      if (scheduledShift && (shiftEvent?.clockInAt || shiftEvent?.status === 'PRESENT')) {
+        earnedAmountPaise += Math.round(Number(scheduledShift.presentPay || 0) * 100);
+      }
+      if (overtimeRecord && (overtimeEvent?.clockInAt || overtimeRecord.status === 'APPROVED' || overtimeRecord.status === 'COMPLETED')) {
+        earnedAmountPaise += Number(overtimeRecord.paymentInr || 0);
+      }
+    }
 
     const pings = shiftEvent
       ? await fastify.db
@@ -642,7 +718,7 @@ export async function getTodayLocationPresence(
 
     const attendanceStatus = shiftEvent
       ? shiftEvent.status
-      : assignment
+      : scheduledShift
         ? 'SCHEDULED'
         : 'NOT_RECORDED';
 
@@ -673,7 +749,7 @@ export async function getTodayLocationPresence(
       premisesName: targetPremises.name,
       attendanceStatus,
       locationStatus,
-      dayOfWeek: dayOfWeekStr,
+      dayOfWeek: cardDayOfWeek,
       shiftName,
       overtimeName:
         overtimeRecord?.reason ||
@@ -692,13 +768,14 @@ export async function getTodayLocationPresence(
       overtimeClockOutTime: overtimeClockOut,
       shiftStatus: shiftEvent
         ? shiftEvent.status
-        : assignment
+        : scheduledShift
           ? 'SCHEDULED'
           : 'NOT_SCHEDULED',
       hasOvertimeToday: Boolean(overtimeRecord),
       overtimeId: overtimeRecord?.id ?? null,
       consecutiveFailures: shiftEvent?.consecutivePingFailures ?? 0,
       exceptionId: openExceptionId,
+      earnedAmountPaise,
       counts: {
         inside: shiftEvent?.insidePingCount ?? 0,
         outside: shiftEvent?.outsidePingCount ?? 0,

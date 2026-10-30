@@ -178,6 +178,65 @@ export async function createOvertime(
     );
   }
 
+  // Check for overlap with active shift assignments for this target employee
+  const activeAssignments = await fastify.db
+    .select({
+      shiftName: schema.shifts.shiftName,
+      startTime: schema.shifts.startTime,
+      endTime: schema.shifts.endTime,
+      dayName: schema.shifts.dayName,
+    })
+    .from(schema.employeeShiftAssignments)
+    .innerJoin(
+      schema.shifts,
+      eq(schema.employeeShiftAssignments.shiftId, schema.shifts.id)
+    )
+    .where(
+      and(
+        eq(schema.employeeShiftAssignments.employeeId, targetProfileId),
+        eq(schema.employeeShiftAssignments.organizationId, organizationId),
+        eq(schema.employeeShiftAssignments.isActive, true),
+        eq(schema.shifts.isActive, true)
+      )
+    );
+
+  const otStart = parseTimeToMinutes(input.startTime);
+  const otEnd = parseTimeToMinutes(input.endTime);
+  const otIsOvernight = isOvernightShift(input.startTime, input.endTime);
+  const otStartMins = otStart;
+  const otEndMins = otIsOvernight ? otEnd + 24 * 60 : otEnd;
+
+  const targetDateObj = new Date(`${input.workDate}T00:00:00Z`);
+  const dayIndex = targetDateObj.getUTCDay();
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const targetDayName = dayNames[dayIndex];
+
+  for (const assignment of activeAssignments) {
+    const shiftDay = assignment.dayName;
+    const matchesDay =
+      !shiftDay ||
+      shiftDay.toUpperCase() === 'ALL' ||
+      shiftDay.toUpperCase().includes('EVERYDAY') ||
+      (targetDayName && shiftDay.toLowerCase().includes(targetDayName.toLowerCase()));
+
+    if (matchesDay) {
+      const shiftStart = parseTimeToMinutes(assignment.startTime);
+      const shiftEnd = parseTimeToMinutes(assignment.endTime);
+      const shiftIsOvernight = isOvernightShift(assignment.startTime, assignment.endTime);
+      const shiftStartMins = shiftStart;
+      const shiftEndMins = shiftIsOvernight ? shiftEnd + 24 * 60 : shiftEnd;
+
+      const overlap = Math.max(otStartMins, shiftStartMins) < Math.min(otEndMins, shiftEndMins);
+      if (overlap) {
+        throw new AppError(
+          `Overtime (${input.startTime} – ${input.endTime}) overlaps with assigned shift "${assignment.shiftName}" (${assignment.startTime} – ${assignment.endTime}). Overtime cannot overlap with an assigned shift.`,
+          400,
+          'OVERTIME_SHIFT_OVERLAP'
+        );
+      }
+    }
+  }
+
   const [created] = await fastify.db
     .insert(schema.overtime)
     .values({

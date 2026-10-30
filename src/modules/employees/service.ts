@@ -10,7 +10,7 @@ import { CreateEmployeeInput, EmployeeDto } from './schemas.js';
 
 export const EMPLOYEE_TTL_HOURS = 48;
 
-function toCents(value: string | number | null | undefined): number {
+function toPaise(value: string | number | null | undefined): number {
   if (value === null || value === undefined) return 0;
   return Math.round(Number(value) * 100);
 }
@@ -170,16 +170,16 @@ export async function createEmployee(
 
   const orgName = org?.name || 'Organization';
 
-  try {
-    await sendUserCreationEmail({
+  setImmediate(() => {
+    sendUserCreationEmail({
       to: email,
       role: input.role,
       organizationName: orgName,
       logger: fastify.log,
+    }).catch((mailErr) => {
+      fastify.log.warn({ err: mailErr, email }, 'Failed to send employee onboarding email');
     });
-  } catch (mailErr) {
-    fastify.log.warn({ err: mailErr, email }, 'Failed to send employee onboarding email');
-  }
+  });
 
   const [premisesRecord] = profile.premisesId ? await fastify.db
     .select({ name: schema.premises.name })
@@ -208,9 +208,9 @@ export async function createEmployee(
     premisesName: premisesRecord?.name ?? null,
     hireDate: String(profile.hireDate),
     isActive: profile.isActive,
-    earnedBalanceCents: 0,
-    approvedUnpaidBalanceCents: 0,
-    paidBalanceCents: 0,
+    earnedBalancePaise: 0,
+    approvedUnpaidBalancePaise: 0,
+    paidBalancePaise: 0,
   };
 }
 
@@ -270,7 +270,7 @@ export async function listEmployees(
     .groupBy((schema as any).employeeEarningLedger.employeeId);
 
   const earnedByEmployee = new Map(
-    earnedRows.map((row) => [row.employeeId, toCents(row.earned)])
+    earnedRows.map((row) => [row.employeeId, toPaise(row.earned)])
   );
 
   // Paid and due from payroll
@@ -292,7 +292,7 @@ export async function listEmployees(
   const payrollByEmployee = new Map(
     payrollRows.map((row) => [
       row.employeeId,
-      { paid: toCents(row.paid), due: toCents(row.due) },
+      { paid: toPaise(row.paid), due: toPaise(row.due) },
     ])
   );
 
@@ -321,9 +321,9 @@ export async function listEmployees(
       premisesName: row.premisesName ?? null,
       hireDate: String(row.hireDate),
       isActive: row.isActive,
-      earnedBalanceCents: earned,
-      approvedUnpaidBalanceCents: payroll.due,
-      paidBalanceCents: payroll.paid,
+      earnedBalancePaise: earned,
+      approvedUnpaidBalancePaise: payroll.due,
+      paidBalancePaise: payroll.paid,
     };
   });
 }

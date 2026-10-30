@@ -72,6 +72,7 @@ export const locationStaffCardSchema = z.object({
   overtimeId: z.string().uuid().nullable(),
   consecutiveFailures: z.number().int().nonnegative(),
   exceptionId: z.string().nullable(),
+  earnedAmountPaise: z.number().int().default(0),
   counts: gpsCountsSchema,
   latestPings: z.array(gpsPingSummarySchema),
 });

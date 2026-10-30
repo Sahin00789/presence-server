@@ -53,7 +53,7 @@ export interface ExceptionRaisedPayload {
 export interface PayrollUpdatePayload {
   payrollPeriodId: string;
   status: string;
-  totalNetSalaryCents: number;
+  totalNetSalaryPaise: number;
 }
 
 export interface ShiftUpdatePayload {
