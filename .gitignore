@@ -6,8 +6,6 @@ coverage/
 .env.local
 .env.*.local
 
-# Database cleanup and seed scripts (local only, not uploaded to git)
-scripts/clean-db.ts
+# Build output of the local database cleanup script
 scripts/clean-db.js
-clean-db.ts
 clean-db.js
