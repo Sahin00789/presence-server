@@ -73,4 +73,11 @@ jobs:
             npm run db:migrate
             pm2 restart presence-api --update-env
             sleep 3
-            curl -fsS http://127.0.0.1:3000/health/ready
+            for i in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:3000/health/ready; then
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "Health check did not pass within 60s"
+            exit 1
