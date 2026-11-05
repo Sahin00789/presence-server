@@ -56,7 +56,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: SSH deploy
-        if: ${{ secrets.DEPLOY_SSH_KEY != '' }}
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: 129.225.86.221
