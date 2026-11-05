@@ -1,0 +1,77 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: Typecheck, build, test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: presence
+          POSTGRES_PASSWORD: presence
+          POSTGRES_DB: presence
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U presence -d presence"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://presence:presence@127.0.0.1:5432/presence
+      GOOGLE_WEB_CLIENT_ID: ci-client.apps.googleusercontent.com
+      GOOGLE_WEB_CLIENT_SECRET: ci-secret
+      ACCESS_TOKEN_SECRET: ci_access_token_secret_at_least_32_characters
+      REFRESH_TOKEN_SECRET: ci_refresh_token_secret_at_least_32_characters
+      CLOUDINARY_CLOUD_NAME: ci-cloud
+      CLOUDINARY_API_KEY: ci-key
+      CLOUDINARY_API_SECRET: ci-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run db:migrate
+      - run: npm test
+
+  deploy:
+    name: Deploy to VPS
+    needs: ci
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH deploy
+        if: ${{ secrets.DEPLOY_SSH_KEY != '' }}
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 129.225.86.221
+          username: ubuntu
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script_stop: true
+          command_timeout: 20m
+          script: |
+            set -e
+            cd /opt/presence
+            git fetch origin main
+            git reset --hard origin/main
+            npm ci --no-audit --no-fund
+            npm run build
+            npm run db:migrate
+            pm2 restart presence-api --update-env
+            sleep 3
+            curl -fsS http://127.0.0.1:3000/health/ready
