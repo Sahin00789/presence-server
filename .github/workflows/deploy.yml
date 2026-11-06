@@ -39,15 +39,18 @@ jobs:
       CLOUDINARY_API_SECRET: ci-secret
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci --no-audit --no-fund
-      - run: npm run typecheck
-      - run: npm run build
-      - run: npm run db:migrate
-      - run: npm test
+          node-version: 20
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run build
+      - run: pnpm run db:migrate
+      - run: pnpm run test
 
   deploy:
     name: Deploy to VPS
@@ -68,9 +71,9 @@ jobs:
             cd /opt/presence
             git fetch origin main
             git reset --hard origin/main
-            npm ci --no-audit --no-fund
-            npm run build
-            npm run db:migrate
+            pnpm install --frozen-lockfile
+            pnpm run build
+            pnpm run db:migrate
             pm2 restart presence-api --update-env
             sleep 3
             for i in $(seq 1 30); do
