@@ -22,13 +22,13 @@ export const livenessEvidenceSchema = z.object({
 });
 
 export const enrollMultiPoseSchema = z.object({
-  /** The employee whose five poses are being enrolled (supervised). */
+  /** The employee whose face is being enrolled (supervised). */
   staffProfileId: z.string().uuid(),
   centerVector: vector128Schema,
-  leftVector: vector128Schema,
-  rightVector: vector128Schema,
-  upVector: vector128Schema,
-  downVector: vector128Schema,
+  leftVector: vector128Schema.optional(),
+  rightVector: vector128Schema.optional(),
+  upVector: vector128Schema.optional(),
+  downVector: vector128Schema.optional(),
   modelVersion: z.string().trim().min(1).max(64).default('sface-yunet-v1'),
   qualityScore: z.number().min(0).max(1).optional().default(0.95),
   premisesId: z.string().uuid().optional(),

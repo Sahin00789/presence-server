@@ -153,11 +153,18 @@ export async function saveMultiPoseEnrollment(
 export async function matchLiveFaceVector(
   fastify: FastifyInstance,
   organizationId: string,
-  input: ClockInFaceInput
+  input: { liveVector?: number[]; embeddingVector?: number[]; liveness?: any; premisesId?: string }
 ) {
-  assertLivenessEvidence(input.liveness);
+  if (input.liveness) {
+    assertLivenessEvidence(input.liveness);
+  }
 
-  const liveVector = sanitizePoseVector(input.liveVector);
+  const rawVector = input.liveVector ?? input.embeddingVector;
+  if (!rawVector) {
+    throw new AppError('A face embedding vector is required', 400, 'FACE_EMBEDDING_REQUIRED');
+  }
+
+  const liveVector = sanitizePoseVector(rawVector);
   const vectorLiteral = `[${liveVector.join(',')}]`;
   const threshold = FACE_EMBEDDING_SIMILARITY_THRESHOLD;
 
@@ -322,3 +329,7 @@ export async function getMultiPoseEnrollmentStatus(
     modelVersion: template.modelVersion ?? null,
   };
 }
+
+export const verifyFaceForClockIn = matchLiveFaceVector;
+export const verifyMultiPoseClockIn = matchLiveFaceVector;
+export const verify = matchLiveFaceVector;

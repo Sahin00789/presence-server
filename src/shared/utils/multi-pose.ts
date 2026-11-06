@@ -33,13 +33,22 @@ export function sanitizePoseVector(input: unknown): number[] {
   return normalizeEmbedding(vector);
 }
 
-export function sanitizePoseVectors(input: PoseVectors): PoseVectors {
+export interface PoseVectorsInput {
+  center: number[];
+  left?: number[];
+  right?: number[];
+  up?: number[];
+  down?: number[];
+}
+
+export function sanitizePoseVectors(input: PoseVectorsInput): PoseVectors {
+  const center = sanitizePoseVector(input.center);
   return {
-    center: sanitizePoseVector(input.center),
-    left: sanitizePoseVector(input.left),
-    right: sanitizePoseVector(input.right),
-    up: sanitizePoseVector(input.up),
-    down: sanitizePoseVector(input.down),
+    center,
+    left: input.left ? sanitizePoseVector(input.left) : center,
+    right: input.right ? sanitizePoseVector(input.right) : center,
+    up: input.up ? sanitizePoseVector(input.up) : center,
+    down: input.down ? sanitizePoseVector(input.down) : center,
   };
 }
 

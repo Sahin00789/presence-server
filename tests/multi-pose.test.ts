@@ -8,6 +8,7 @@ import {
   bestPoseMatch,
   poseSimilarities,
   sanitizePoseVector,
+  sanitizePoseVectors,
 } from '../src/shared/utils/multi-pose.js';
 
 function unitBasis(index: number, dimensions = 128): number[] {
@@ -32,6 +33,15 @@ describe('Multi-pose vector matching', () => {
   it('accepts exactly 128 dimensions and rejects legacy 512-D vectors', () => {
     expect(sanitizePoseVector(unitBasis(0))).toHaveLength(128);
     expect(() => sanitizePoseVector(unitBasis(0, 512))).toThrow(/128/);
+  });
+
+  it('allows single center pose enrollment and defaults left, right, up, down to center vector', () => {
+    const sanitized = sanitizePoseVectors({ center: unitBasis(0) });
+    expect(sanitized.center).toHaveLength(128);
+    expect(sanitized.left).toEqual(sanitized.center);
+    expect(sanitized.right).toEqual(sanitized.center);
+    expect(sanitized.up).toEqual(sanitized.center);
+    expect(sanitized.down).toEqual(sanitized.center);
   });
 
   it('reports the best matching pose across all five columns', () => {
