@@ -3,12 +3,19 @@ import { roleSchema } from '../auth/schemas.js';
 
 export const createEmployeeSchema = z.object({
   email: z.string().email().trim().toLowerCase(),
-  role: z.enum(['MANAGER', 'STAFF']),
+  role: z.preprocess(
+    (val) => (val === 'STAFF' || val === 'MANAGER' ? 'EMPLOYEE' : val),
+    z.enum(['EMPLOYEE']).optional().default('EMPLOYEE')
+  ),
   fullName: z.string().trim().min(2).optional(),
   staffCode: z.string().trim().min(2).optional(),
   department: z.string().trim().optional(),
   designation: z.string().trim().optional(),
   premisesId: z.string().uuid().nullable().optional(),
+  phone: z.string().trim().optional(),
+  address: z.string().trim().optional(),
+  avatarBase64: z.string().optional(),
+  avatarUrl: z.string().optional(),
 });
 
 export const employeeDtoSchema = z.object({
@@ -21,6 +28,9 @@ export const employeeDtoSchema = z.object({
   staffCode: z.string(),
   department: z.string().nullable(),
   designation: z.string().nullable(),
+  phone: z.string().nullable().optional(),
+  address: z.string().nullable().optional(),
+  avatarUrl: z.string().nullable().optional(),
   role: roleSchema,
   token: z.string().nullable(),
   addedBy: z.string().nullable(),
@@ -37,8 +47,17 @@ export const employeeDtoSchema = z.object({
   paidBalancePaise: z.number().int(),
 });
 
-
-
+export const updateEmployeeSchema = z.object({
+  fullName: z.string().trim().min(2).optional(),
+  department: z.string().trim().nullable().optional(),
+  designation: z.string().trim().nullable().optional(),
+  premisesId: z.string().uuid().nullable().optional(),
+  phone: z.string().trim().nullable().optional(),
+  address: z.string().trim().nullable().optional(),
+  avatarBase64: z.string().optional(),
+  avatarUrl: z.string().nullable().optional(),
+});
 
 export type CreateEmployeeInput = z.infer<typeof createEmployeeSchema>;
+export type UpdateEmployeeInput = z.infer<typeof updateEmployeeSchema>;
 export type EmployeeDto = z.infer<typeof employeeDtoSchema>;

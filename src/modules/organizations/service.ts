@@ -2,7 +2,6 @@ import { FastifyInstance } from 'fastify';
 import { and, count, eq } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
-import { writeAuditLog } from '../../shared/services/audit.service.js';
 import { sendOrganizationWelcomeEmail } from '../../shared/services/mail.service.js';
 import {
   CreateOrganizationInput,
@@ -44,43 +43,30 @@ export async function getOrganizationSummary(
 ): Promise<OrganizationSummary> {
   const organization = await getOrganization(fastify, organizationId);
 
-  const [staffTotals] = await fastify.db
+  const [employeeTotals] = await fastify.db
     .select({ total: count() })
     .from(schema.employees)
     .where(
       and(
         eq(schema.employees.organizationId, organizationId),
         eq(schema.employees.isActive, true),
-        eq(schema.employees.role, 'STAFF')
+        eq(schema.employees.role, 'EMPLOYEE')
       )
     );
 
-  const [managerTotals] = await fastify.db
-    .select({ total: count() })
-    .from(schema.employees)
-    .where(
-      and(
-        eq(schema.employees.organizationId, organizationId),
-        eq(schema.employees.isActive, true),
-        eq(schema.employees.role, 'MANAGER')
-      )
-    );
-
-  const memberCount = 1 + (staffTotals?.total ?? 0) + (managerTotals?.total ?? 0);
+  const totalEmployees = employeeTotals?.total ?? 0;
+  const memberCount = 1 + totalEmployees;
 
   return {
     organization,
     memberCount,
-    staffCount: staffTotals?.total ?? 0,
-    managerCount: managerTotals?.total ?? 0,
+    staffCount: totalEmployees,
+    managerCount: 0,
   };
 }
 
 /**
  * Creates an additional organization for an Owner.
- *
- * Ownership is recorded directly on `organizations.owner_user_id`; there is no
- * separate membership table. A user may own more than one organization.
  */
 export async function createOrganization(
   fastify: FastifyInstance,
@@ -113,16 +99,6 @@ export async function createOrganization(
     return organization;
   });
 
-  await writeAuditLog(fastify, {
-    organizationId: result.id,
-    actorId: ownerUserId,
-    action: 'ORGANIZATION_CREATED',
-    resourceType: 'organization',
-    resourceId: result.id,
-    metadata: { name: result.name },
-  });
-
-  // Non-blocking asynchronous welcome email dispatch to Owner in background
   setImmediate(() => {
     fastify.db
       .select({ email: schema.users.email, fullName: schema.users.fullName })
@@ -184,15 +160,6 @@ export async function updateOrganization(
   if (!updated) {
     throw new AppError('Organization not found', 404, 'ORGANIZATION_NOT_FOUND');
   }
-
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'ORGANIZATION_UPDATED',
-    resourceType: 'organization',
-    resourceId: organizationId,
-    metadata: input as Record<string, unknown>,
-  });
 
   return {
     id: updated.id,
@@ -268,7 +235,7 @@ export async function listOrganizationMembers(
         email: row.email,
         fullName: row.fullName,
         avatarUrl: row.avatarUrl,
-        role: row.role,
+        role: ((row.role as string) === 'OWNER' ? 'OWNER' : 'EMPLOYEE') as any,
         isActive: row.isActive && row.userIsActive,
         joinedAt: row.joinedAt.toISOString(),
         staffProfileId: row.staffProfileId,
@@ -281,12 +248,6 @@ export async function listOrganizationMembers(
   return members;
 }
 
-/**
- * Deactivates (never deletes) an employee of the organization.
- *
- * `docs/SECURITY.md` §2.4 requires biometric data to be deleted upon
- * termination, so deactivating a staff member also removes their face template.
- */
 export async function deactivateMember(
   fastify: FastifyInstance,
   organizationId: string,
@@ -340,19 +301,9 @@ export async function deactivateMember(
       })
       .where(eq(schema.employees.id, profile.id));
 
-    // Biometric data must be purged on termination.
     await tx
       .delete(schema.multiPoseFaceTemplates)
       .where(eq(schema.multiPoseFaceTemplates.employeeId, profile.id));
-  });
-
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'MEMBER_DEACTIVATED',
-    resourceType: 'employee',
-    resourceId: profile.id,
-    metadata: { targetUserId, role: profile.role },
   });
 
   return { deactivated: true };

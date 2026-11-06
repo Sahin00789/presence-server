@@ -20,6 +20,27 @@ describe('Single-Shift Leave Request Module', () => {
       expect(parsed.reason).toBe('Medical checkup appointment');
     });
 
+    it('accepts array of assignedShiftIdWithDate for leave request creation', () => {
+      const valid = {
+        assignedShiftIdWithDate: [
+          {
+            shiftAssignmentId: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+            workDate: '2025-06-15',
+          },
+          {
+            shiftAssignmentId: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+            workDate: '2025-06-16',
+          },
+        ],
+        reason: 'Personal leave',
+      };
+      const parsed = createLeaveRequestSchema.parse(valid);
+      expect(parsed.assignedShiftIdWithDate).toHaveLength(2);
+      expect(parsed.assignedShiftIdWithDate?.[0].workDate).toBe('2025-06-15');
+      expect(parsed.assignedShiftIdWithDate?.[1].workDate).toBe('2025-06-16');
+      expect(parsed.reason).toBe('Personal leave');
+    });
+
     it('rejects invalid workDate format', () => {
       const invalid = {
         shiftAssignmentId: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',

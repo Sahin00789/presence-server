@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { and, desc, eq, gte, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 const staffEarningLedger = (schema as any).employeeEarningLedger ?? (schema as any).staffEarningLedger;
 import { AppError } from '../../shared/errors/app-error.js';
@@ -18,7 +18,6 @@ import {
   toDateISOInTimeZone,
 } from '../../shared/utils/datetime.js';
 import { buildSchedule, getAssignedDayNumbers, resolveTimezone } from '../shifts/service.js';
-import { writeAuditLog } from '../../shared/services/audit.service.js';
 
 import {
   assertLivenessEvidence,
@@ -162,8 +161,6 @@ export function resolveClockOutResult(input: {
   const status: AttendanceStatus =
     input.workedMinutes < input.halfDayThresholdMinutes
       ? 'HALF_DAY'
-      : (input.existingStatus as string) === 'LATE'
-      ? ('LATE' as AttendanceStatus)
       : 'PRESENT';
 
   return {
@@ -285,23 +282,15 @@ async function resolveShiftForClockIn(
     }
   }
 
-  // 3. If still no assignment found for today or overnight yesterday, look ahead for future days (1..7)
   if (!selectedAssignment) {
-    for (let d = 1; d <= 7; d++) {
-      const futureDate = addDays(today, d);
-      const futureDow = new Date(`${futureDate}T00:00:00Z`).getUTCDay();
-      const futureMatch = assignments.find((a) =>
-        getAssignedDayNumbers(a.dayName).includes(futureDow)
-      );
-      if (futureMatch) {
-        selectedAssignment = futureMatch;
-        workDate = futureDate;
-        break;
-      }
-    }
+    throw new AppError(
+      'No active shift is scheduled for you today according to your assigned shift days.',
+      400,
+      'NO_SHIFT_SCHEDULED_TODAY'
+    );
   }
 
-  const assignment = selectedAssignment || assignments[0];
+  const assignment = selectedAssignment;
 
   const window =
     workDate === today
@@ -644,22 +633,6 @@ export async function clockIn(
       .where(eq(schema.overtime.id, overtime.id));
   }
 
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: userId,
-    action: 'ATTENDANCE_CLOCK_IN',
-    resourceType: 'employee_attendance',
-    resourceId: event.id,
-    metadata: {
-      workDate,
-      status,
-      faceSimilarity: faceScore,
-      geofenceResult: geofence.result,
-      premisesId: premises.id,
-      overtimeId: overtime?.id ?? null,
-    },
-  });
-
   if (typeof fastify.publishDomainEvent === 'function') {
     await fastify.publishDomainEvent({
       type: 'attendance_update',
@@ -809,15 +782,6 @@ export async function requestManualClockIn(
     });
   }
 
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: userId,
-    action: 'ATTENDANCE_MANUAL_REQUESTED',
-    resourceType: 'employee_attendance',
-    resourceId: event.id,
-    metadata: { reason: body.reason, exceptionId },
-  });
-
   return {
     event: toPublicAttendanceEvent(event),
     exceptionId,
@@ -917,19 +881,6 @@ export async function clockOut(
       event.id
     );
 
-    await writeAuditLog(fastify, {
-      organizationId,
-      actorId: userId,
-      action: 'ATTENDANCE_CLOCK_OUT',
-      resourceType: 'employee_attendance',
-      resourceId: event.id,
-      metadata: {
-        workDate: String(event.workDate),
-        status: 'PRESENT',
-        workedMinutes: event.workedMinutes || 0,
-      },
-    });
-
     if (typeof fastify.publishDomainEvent === 'function') {
       await fastify.publishDomainEvent({
         type: 'attendance_update',
@@ -959,19 +910,6 @@ export async function clockOut(
     .returning();
 
   await accrueShiftEarnings(fastify, organizationId, updated);
-
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: userId,
-    action: 'ATTENDANCE_CLOCK_OUT',
-    resourceType: 'employee_attendance',
-    resourceId: event.id,
-    metadata: {
-      workDate: String(event.workDate),
-      status: 'PRESENT',
-      workedMinutes: updated.workedMinutes,
-    },
-  });
 
   if (typeof fastify.publishDomainEvent === 'function') {
     await fastify.publishDomainEvent({
@@ -1112,7 +1050,7 @@ export async function completeOvertime(
 
 export async function listExceptions(
   fastify: FastifyInstance,
-  user: { userId: string; role: 'OWNER' | 'MANAGER' | 'STAFF' },
+  user: { userId: string; role: 'OWNER' | 'EMPLOYEE' },
   organizationId: string
 ) {
   const conditions = [
@@ -1130,7 +1068,7 @@ export async function listExceptions(
     ),
   ];
 
-  if (user.role === 'STAFF') {
+  if (user.role === 'EMPLOYEE') {
     const profile = await findStaffProfile(fastify, user.userId, organizationId);
     if (!profile) {
       return [];
@@ -1187,7 +1125,7 @@ export async function listExceptions(
  */
 export async function listAttendanceRecords(
   fastify: FastifyInstance,
-  user: { userId: string; role: 'OWNER' | 'MANAGER' | 'STAFF' },
+  user: { userId: string; role: 'OWNER' | 'EMPLOYEE' },
   organizationId: string,
   query: {
     from?: string;
@@ -1197,16 +1135,39 @@ export async function listAttendanceRecords(
     offset?: number;
   }
 ) {
-  const conditions = [eq(schema.employeeAttendance.organizationId, organizationId)];
+  const conditions = [
+    eq(schema.employeeAttendance.organizationId, organizationId),
+    or(
+      isNotNull(schema.employeeAttendance.clockInAt),
+      inArray(schema.employeeAttendance.status, ['PRESENT', 'HALF_DAY', 'ABSENT', 'LEAVE'])
+    ),
+  ];
 
-  if (user.role === 'STAFF') {
-    const profile = await findStaffProfile(fastify, user.userId, organizationId);
-    if (!profile) {
-      return [];
+  if (query.staffProfileId) {
+    const [emp] = await fastify.db
+      .select({ id: schema.employees.id })
+      .from(schema.employees)
+      .where(
+        and(
+          eq(schema.employees.organizationId, organizationId),
+          or(
+            eq(schema.employees.id, query.staffProfileId),
+            eq(schema.employees.userId, query.staffProfileId)
+          )
+        )
+      )
+      .limit(1);
+
+    if (emp) {
+      conditions.push(eq(schema.employeeAttendance.employeeId, emp.id));
+    } else {
+      conditions.push(eq(schema.employeeAttendance.employeeId, query.staffProfileId));
     }
-    conditions.push(eq(schema.employeeAttendance.employeeId, profile.id));
-  } else if (query.staffProfileId) {
-    conditions.push(eq(schema.employeeAttendance.employeeId, query.staffProfileId));
+  } else if (user.role === 'EMPLOYEE') {
+    const profile = await findStaffProfile(fastify, user.userId, organizationId);
+    if (profile) {
+      conditions.push(eq(schema.employeeAttendance.employeeId, profile.id));
+    }
   }
 
   if (query.from) {
@@ -1222,6 +1183,12 @@ export async function listAttendanceRecords(
       staffName: schema.users.fullName,
       staffEmail: schema.users.email,
       staffCode: schema.employees.employeeCode,
+      shiftName: schema.shifts.shiftName,
+      shiftStartTime: schema.shifts.startTime,
+      shiftEndTime: schema.shifts.endTime,
+      overtimeStartTime: schema.overtime.startTime,
+      overtimeEndTime: schema.overtime.endTime,
+      overtimeReason: schema.overtime.reason,
     })
     .from(schema.employeeAttendance)
     .innerJoin(
@@ -1229,6 +1196,18 @@ export async function listAttendanceRecords(
       eq(schema.employees.id, schema.employeeAttendance.employeeId)
     )
     .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
+    .leftJoin(
+      schema.employeeShiftAssignments,
+      eq(schema.employeeShiftAssignments.id, schema.employeeAttendance.shiftAssignmentId)
+    )
+    .leftJoin(
+      schema.shifts,
+      eq(schema.shifts.id, schema.employeeShiftAssignments.shiftId)
+    )
+    .leftJoin(
+      schema.overtime,
+      eq(schema.overtime.id, schema.employeeAttendance.overtimeId)
+    )
     .where(and(...conditions))
     .orderBy(
       desc(schema.employeeAttendance.workDate),
@@ -1237,24 +1216,53 @@ export async function listAttendanceRecords(
     .limit(query.limit ?? 100)
     .offset(query.offset ?? 0);
 
-  return rows.map((r) => ({
-    id: r.event.id,
-    staffProfileId: r.event.employeeId,
-    staffName: r.staffName,
-    staffEmail: r.staffEmail,
-    staffCode: r.staffCode,
-    workDate: String(r.event.workDate),
-    clockIn: r.event.clockInAt,
-    clockOut: r.event.clockOutAt,
-    status: r.event.status,
-    faceVerified: r.event.faceVerified,
-    geofenceVerified: r.event.geofenceVerified,
-    workedMinutes: r.event.workedMinutes,
-    overtimeMinutes: r.event.overtimeMinutes,
-    scheduledMinutes: r.event.scheduledMinutes,
-    premisesId: r.event.premisesId,
-    overtimeId: r.event.overtimeId ?? null,
-  }));
+  return rows.map((r) => {
+    const isOvertime = r.event.attendanceType === 'OVERTIME' || Boolean(r.event.overtimeId);
+    const assignedStartTime = isOvertime ? r.overtimeStartTime : r.shiftStartTime;
+    let lateMinutes = 0;
+    if (r.event.clockInAt && assignedStartTime) {
+      try {
+        const clockInDate = new Date(r.event.clockInAt);
+        const [sh, sm] = assignedStartTime.split(':').map(Number);
+        const shiftStartDate = new Date(clockInDate);
+        shiftStartDate.setHours(sh, sm, 0, 0);
+        const diffMs = clockInDate.getTime() - shiftStartDate.getTime();
+        if (diffMs > 0) {
+          lateMinutes = Math.floor(diffMs / 60_000);
+        }
+      } catch (_e) {
+        lateMinutes = 0;
+      }
+    }
+
+    return {
+      id: r.event.id,
+      organizationId: r.event.organizationId,
+      premisesId: r.event.premisesId,
+      employeeId: r.event.employeeId,
+      staffProfileId: r.event.employeeId,
+      staffName: r.staffName,
+      staffEmail: r.staffEmail,
+      staffCode: r.staffCode,
+      workDate: String(r.event.workDate),
+      clockIn: r.event.clockInAt,
+      clockOut: r.event.clockOutAt,
+      status: r.event.status,
+      attendanceType: r.event.attendanceType,
+      shiftName: isOvertime
+        ? (r.overtimeReason || 'Overtime Session')
+        : (r.shiftName || 'Shift Session'),
+      assignedStartTime,
+      assignedEndTime: isOvertime ? r.overtimeEndTime : r.shiftEndTime,
+      faceVerified: r.event.faceVerified,
+      geofenceVerified: r.event.geofenceVerified,
+      workedMinutes: r.event.workedMinutes,
+      scheduledMinutes: r.event.scheduledMinutes,
+      overtimeMinutes: r.event.overtimeMinutes,
+      lateMinutes,
+      overtimeId: r.event.overtimeId ?? null,
+    };
+  });
 }
 
 export interface AttendanceSummary {
@@ -1515,20 +1523,6 @@ export async function resolveException(
     }
   });
 
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'ATTENDANCE_CORRECTED',
-    resourceType: 'employee_attendance',
-    resourceId: event.id,
-    metadata: {
-      previousStatus: event.status,
-      correctedStatus: input.correctedStatus,
-      reason: input.reason,
-      note: input.note ?? null,
-    },
-  });
-
   return {
     id: exceptionId,
     status: 'RESOLVED' as const,
@@ -1726,19 +1720,6 @@ export async function correctDailyAttendance(
     return [attendance];
   });
 
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'DAILY_ATTENDANCE_CORRECTED',
-    resourceType: 'employee_attendance',
-    resourceId: dailyAttendanceId,
-    metadata: {
-      status: input.attendanceStatus,
-      overridePaymentAmount: input.overridePaymentAmount ?? null,
-      remarks: input.remarks ?? null,
-    },
-  });
-
   return {
     id: updated.id,
     attendanceStatus: updated.status,
@@ -1764,6 +1745,10 @@ export async function getEmployeeAttendanceAndEarningsHistory(
   const conditions = [
     eq(schema.employeeAttendance.organizationId, organizationId),
     eq(schema.employeeAttendance.employeeId, profile.id),
+    or(
+      isNotNull(schema.employeeAttendance.clockInAt),
+      inArray(schema.employeeAttendance.status, ['PRESENT', 'HALF_DAY', 'ABSENT', 'LEAVE'])
+    ),
   ];
   if (from) conditions.push(gte(schema.employeeAttendance.workDate, from));
   if (to) conditions.push(lte(schema.employeeAttendance.workDate, to));
@@ -1833,7 +1818,6 @@ export async function manualMarkAttendance(fastify: any, organizationId: string,
     const now = new Date();
     if (now.getTime() > new Date(String(ot.workDate) + 'T' + ot.endTime).getTime()) throw new AppError('Cannot delete overtime after it has ended', 400, 'OVERTIME_ENDED');
     await fastify.db.delete(schema.overtime).where(eq(schema.overtime.id, input.overtimeId));
-    await writeAuditLog(fastify, { organizationId, actorId: actorUserId, action: 'OVERTIME_DELETED_BY_MANUAL_MARK', resourceType: 'overtime', resourceId: input.overtimeId });
     return { deleted: true, overtimeId: input.overtimeId };
   }
   let event: any = null;
@@ -1867,7 +1851,6 @@ export async function manualMarkAttendance(fastify: any, organizationId: string,
   if (outside <= 3) throw new AppError('Manual marking only allowed when outside count > 3', 400, 'MANUAL_MARK_NOT_ALLOWED');
   const targetStatus = input.action;
   const [updated] = await fastify.db.update(schema.employeeAttendance).set({ status: targetStatus, updatedAt: new Date(), statusUpdatedBy: actorUserId, correctionReason: input.reason ?? null, correctedAt: new Date() }).where(eq(schema.employeeAttendance.id, event.id)).returning();
-  await writeAuditLog(fastify, { organizationId, actorId: actorUserId, action: 'ATTENDANCE_MANUAL_MARK', resourceType: 'employee_attendance', resourceId: event.id, metadata: { action: input.action, reason: input.reason } });
   return toPublicAttendanceEvent(updated);
 }
 

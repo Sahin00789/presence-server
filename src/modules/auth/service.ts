@@ -49,7 +49,7 @@ function hashOtp(code: string): string {
 }
 
 interface ActiveMembership {
-  role: 'OWNER' | 'MANAGER' | 'STAFF';
+  role: 'OWNER' | 'EMPLOYEE';
   organizationId: string;
   organizationName: string;
   organizationLogoUrl: string | null;
@@ -128,35 +128,84 @@ export async function requestOtp(
   input: OtpRequestInput
 ): Promise<OtpResponse> {
   const email = input.email.toLowerCase().trim();
-  const role = input.role || 'STAFF';
+  const role = input.role || 'EMPLOYEE';
+  const isRegistration = input.isRegistration ?? false;
 
   // Role Account Verification & Access Rules:
-  // Unregistered Manager / Staff must be refused sign-in with explicit message.
-  if (role === 'MANAGER' || role === 'STAFF') {
-    const [userRecord] = await fastify.db
-      .select({ id: schema.users.id })
-      .from(schema.users)
-      .where(eq(schema.users.email, email))
-      .limit(1);
+  // Refuse OTP generation if user is not registered for that role (unless registering a new Owner).
+  const [userRecord] = await fastify.db
+    .select({ id: schema.users.id, isActive: schema.users.isActive })
+    .from(schema.users)
+    .where(eq(schema.users.email, email))
+    .limit(1);
 
-    let isEmployee = false;
-    if (userRecord) {
-      const [employeeRecord] = await fastify.db
-        .select({ id: schema.employees.id })
-        .from(schema.employees)
-        .where(eq(schema.employees.userId, userRecord.id))
-        .limit(1);
-      if (employeeRecord) {
-        isEmployee = true;
+  if (!isRegistration) {
+    if (!userRecord || !userRecord.isActive) {
+      if (role === 'EMPLOYEE') {
+        throw new AppError(
+          'You are not registered. Employees must be added and invited by the Organization Owner.',
+          403,
+          'NOT_REGISTERED'
+        );
+      } else {
+        throw new AppError(
+          'You are not registered as an Owner. Please complete Owner & Organization Registration.',
+          403,
+          'NOT_REGISTERED'
+        );
       }
     }
 
-    if (!isEmployee) {
-      throw new AppError(
-        'You are not registered. Staff and Managers must be added and invited by the Organization Owner.',
-        403,
-        'NOT_REGISTERED'
-      );
+    if (role === 'EMPLOYEE') {
+      const [employeeRecord] = await fastify.db
+        .select({ id: schema.employees.id })
+        .from(schema.employees)
+        .where(
+          and(
+            eq(schema.employees.userId, userRecord.id),
+            eq(schema.employees.isActive, true)
+          )
+        )
+        .limit(1);
+
+      if (!employeeRecord) {
+        throw new AppError(
+          'You are not registered. Employees must be added and invited by the Organization Owner.',
+          403,
+          'NOT_REGISTERED'
+        );
+      }
+    } else if (role === 'OWNER') {
+      const [orgRecord] = await fastify.db
+        .select({ id: schema.organizations.id })
+        .from(schema.organizations)
+        .where(eq(schema.organizations.ownerUserId, userRecord.id))
+        .limit(1);
+
+      if (!orgRecord) {
+        throw new AppError(
+          'You are not registered as an Owner. Please complete Owner & Organization Registration.',
+          403,
+          'NOT_REGISTERED'
+        );
+      }
+    }
+  } else {
+    // Registration flow (e.g. Owner self-registration): check if already an Owner
+    if (userRecord && userRecord.isActive) {
+      const [orgRecord] = await fastify.db
+        .select({ id: schema.organizations.id })
+        .from(schema.organizations)
+        .where(eq(schema.organizations.ownerUserId, userRecord.id))
+        .limit(1);
+
+      if (orgRecord) {
+        throw new AppError(
+          'An account already exists for this email. Please sign in instead.',
+          409,
+          'ACCOUNT_ALREADY_REGISTERED'
+        );
+      }
     }
   }
 
@@ -167,7 +216,7 @@ export async function requestOtp(
   try {
     await fastify.db.insert(schema.otpRequests).values({
       email,
-      role,
+      role: (role === 'OWNER' ? 'OWNER' : 'EMPLOYEE') as any,
       codeHash: hashOtp(code),
       expiresAt,
     });
@@ -215,7 +264,7 @@ export async function verifyOtp(
 ): Promise<AuthResponse> {
   const email = input.email.toLowerCase().trim();
   const code = input.code.trim();
-  const requestedRole = input.role || 'STAFF';
+  const requestedRole = input.role || 'EMPLOYEE';
 
   const mergedDeviceContext: DeviceContext = {
     deviceName: input.deviceName || deviceContext?.deviceName,
@@ -377,7 +426,7 @@ export async function verifyOtp(
       throw new AppError(
         'You are not registered. Please contact your Administrator to add you.',
         403,
-        'NOT_REGISTERED_STAFF'
+        'NOT_REGISTERED_EMPLOYEE'
       );
     }
   }
@@ -1051,7 +1100,7 @@ async function issueUserSession(
     email: string;
     fullName: string;
     avatarUrl?: string | null;
-    role: 'OWNER' | 'MANAGER' | 'STAFF';
+    role: 'OWNER' | 'EMPLOYEE';
     deviceInfo?: DeviceContext;
   }
 ): Promise<AuthResponse> {

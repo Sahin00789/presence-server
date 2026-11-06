@@ -36,8 +36,8 @@ export const vector128 = customType<{ data: number[]; driverData: string }>({
 });
 
 // Enums
-export const roleEnum = pgEnum('role', ['OWNER', 'MANAGER', 'STAFF']);
-export const employeeRoleEnum = pgEnum('employee_role', ['MANAGER', 'STAFF']);
+export const roleEnum = pgEnum('role', ['OWNER', 'EMPLOYEE']);
+export const employeeRoleEnum = pgEnum('employee_role', ['EMPLOYEE']);
 export const attendanceTypeEnum = pgEnum('attendance_type', ['SHIFT', 'OVERTIME']);
 export const attendanceStatusEnum = pgEnum('attendance_status', [
   'PRESENT',
@@ -73,9 +73,6 @@ export const leaveStatusEnum = pgEnum('leave_status', [
   'REJECTED',
   'CANCELLED',
 ]);
-export const faceEnrollmentMethodEnum = pgEnum('face_enrollment_method', [
-  'MANAGER_SUPERVISED',
-]);
 
 // 1. Users (Authentication Identities)
 export const users = pgTable('users', {
@@ -108,7 +105,7 @@ export const organizations = pgTable('organizations', {
 export const otpRequests = pgTable('otp_requests', {
   id: uuid('id').primaryKey().defaultRandom(),
   email: text('email').notNull(),
-  role: roleEnum('role').notNull().default('STAFF'),
+  role: roleEnum('role').notNull().default('EMPLOYEE'),
   codeHash: text('code_hash').notNull(),
   attempts: integer('attempts').notNull().default(0),
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
@@ -175,11 +172,12 @@ export const employees = pgTable('employees', {
   organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
   premisesId: uuid('premises_id').references(() => premises.id, { onDelete: 'set null' }),
-  role: employeeRoleEnum('role').notNull().default('STAFF'),
+  role: employeeRoleEnum('role').notNull().default('EMPLOYEE'),
   employeeCode: text('employee_code').notNull(),
   name: text('name').notNull(),
   department: text('department'),
   designation: text('designation'),
+  address: text('address'),
   hireDate: date('hire_date').notNull(),
   terminationDate: date('termination_date'),
   isActive: boolean('is_active').notNull().default(true),
@@ -335,31 +333,7 @@ export const attendanceLocationPings = pgTable('attendance_location_pings', {
   index('attendance_pings_attendance_checked_idx').on(table.attendanceId, table.checkedAt),
 ]);
 
-// 13. Monthly Attendance Statistics
-export const monthlyAttendanceStats = pgTable('monthly_attendance_stats', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
-  premisesId: uuid('premises_id').notNull().references(() => premises.id, { onDelete: 'cascade' }),
-  employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'cascade' }),
-  month: integer('month').notNull(),
-  year: integer('year').notNull(),
-  presentShiftsCount: integer('present_shifts_count').notNull().default(0),
-  absentShiftsCount: integer('absent_shifts_count').notNull().default(0),
-  leaveShiftsCount: integer('leave_shifts_count').notNull().default(0),
-  halfDayShiftsCount: integer('half_day_shifts_count').notNull().default(0),
-  holidayCount: integer('holiday_count').notNull().default(0),
-  offDayCount: integer('off_day_count').notNull().default(0),
-  overtimeCount: integer('overtime_count').notNull().default(0),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-}, (table) => [
-  uniqueIndex('monthly_att_stats_uniq_idx').on(
-    table.organizationId, table.premisesId, table.employeeId, table.month, table.year
-  ),
-  index('monthly_att_stats_org_emp_idx').on(table.organizationId, table.employeeId),
-]);
-
-// 14. Monthly Payrolls
+// 13. Monthly Payrolls
 export const monthlyPayrolls = pgTable('monthly_payrolls', {
   id: uuid('id').primaryKey().defaultRandom(),
   organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
@@ -368,7 +342,6 @@ export const monthlyPayrolls = pgTable('monthly_payrolls', {
   month: integer('month').notNull(),
   year: integer('year').notNull(),
   earnedAmount: numeric('earned_amount', { precision: 12, scale: 2 }).notNull().default('0.00'),
-  deductionAmount: numeric('deduction_amount', { precision: 12, scale: 2 }).notNull().default('0.00'),
   paidAmount: numeric('paid_amount', { precision: 12, scale: 2 }).notNull().default('0.00'),
   dueAmount: numeric('due_amount', { precision: 12, scale: 2 }).notNull().default('0.00'),
   status: monthlyPayrollStatusEnum('status').notNull().default('OPEN'),
@@ -381,7 +354,7 @@ export const monthlyPayrolls = pgTable('monthly_payrolls', {
   index('monthly_payrolls_org_emp_idx').on(table.organizationId, table.employeeId),
 ]);
 
-// 15. Overtime
+// 14. Overtime
 export const overtime = pgTable('overtime', {
   id: uuid('id').primaryKey().defaultRandom(),
   organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
@@ -408,7 +381,7 @@ export const overtime = pgTable('overtime', {
   uniqueIndex('overtime_employee_date_start_idx').on(table.employeeId, table.workDate, table.startTime),
 ]);
 
-// 16. Employee Earning Ledger (append-only salary accruals)
+// 15. Employee Earning Ledger (append-only salary accruals)
 export const employeeEarningLedger = pgTable('employee_earning_ledger', {
   id: uuid('id').primaryKey().defaultRandom(),
   organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
@@ -438,17 +411,9 @@ export const employeeEarningLedger = pgTable('employee_earning_ledger', {
 ]);
 
 
-// 17. Payroll Deductions
-export const payrollDeductions = pgTable('payroll_deductions', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  monthlyPayrollId: uuid('monthly_payroll_id').notNull().references(() => monthlyPayrolls.id, { onDelete: 'cascade' }),
-  amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
-  reason: text('reason').notNull(),
-  createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
 
-// 18. Payroll Transactions
+
+// 16. Payroll Transactions
 export const payrollTransactions = pgTable('payroll_transactions', {
   id: uuid('id').primaryKey().defaultRandom(),
   monthlyPayrollId: uuid('monthly_payroll_id').notNull().references(() => monthlyPayrolls.id, { onDelete: 'cascade' }),
@@ -460,21 +425,22 @@ export const payrollTransactions = pgTable('payroll_transactions', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-// 19. Holiday Calendars
+// 17. Holiday Calendars
 export const holidayCalendars = pgTable('holiday_calendars', {
   id: uuid('id').primaryKey().defaultRandom(),
   organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
-  premisesId: uuid('premises_id').references(() => premises.id, { onDelete: 'cascade' }),
+  premisesId: uuid('premises_id').notNull().references(() => premises.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),
   date: date('date').notNull(),
   isPaid: boolean('is_paid').notNull().default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   uniqueIndex('holiday_org_premises_date_idx').on(table.organizationId, table.premisesId, table.date),
+  index('holiday_premises_date_idx').on(table.premisesId, table.date),
   index('holiday_org_date_idx').on(table.organizationId, table.date),
 ]);
 
-// 20. Weekly Offs
+// 18. Weekly Offs
 export const weeklyOffs = pgTable('weekly_offs', {
   id: uuid('id').primaryKey().defaultRandom(),
   employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'cascade' }),
@@ -484,7 +450,7 @@ export const weeklyOffs = pgTable('weekly_offs', {
   uniqueIndex('weekly_off_emp_day_idx').on(table.employeeId, table.dayOfWeek),
 ]);
 
-// 21. Unworked Payment Rules
+// 19. Unworked Payment Rules
 export const unworkedPaymentRules = pgTable('unworked_payment_rules', {
   id: uuid('id').primaryKey().defaultRandom(),
   organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
@@ -499,7 +465,7 @@ export const unworkedPaymentRules = pgTable('unworked_payment_rules', {
   index('unworked_payment_rules_emp_idx').on(table.employeeId, table.createdAt),
 ]);
 
-// 22. Leave Requests (one assigned shift occurrence per request)
+// 20. Leave Requests (one assigned shift occurrence per request)
 export const leaveRequests = pgTable('leave_requests', {
   id: uuid('id').primaryKey().defaultRandom(),
   organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
@@ -525,7 +491,7 @@ export const leaveRequests = pgTable('leave_requests', {
 ]);
 
 
-// 23. Clock Nonces
+// 21. Clock Nonces
 export const clockNonces = pgTable('clock_nonces', {
   id: uuid('id').primaryKey().defaultRandom(),
   employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'cascade' }),
@@ -538,16 +504,3 @@ export const clockNonces = pgTable('clock_nonces', {
   index('clock_nonces_emp_idx').on(table.employeeId),
 ]);
 
-// 24. Audit Logs
-export const auditLogs = pgTable('audit_logs', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  organizationId: uuid('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
-  actorId: uuid('actor_id').references(() => users.id),
-  action: text('action').notNull(),
-  resourceType: text('resource_type').notNull(),
-  resourceId: uuid('resource_id'),
-  metadata: jsonb('metadata'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-}, (table) => [
-  index('audit_logs_org_created_idx').on(table.organizationId, table.createdAt),
-]);

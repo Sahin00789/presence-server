@@ -1,12 +1,11 @@
-import { randomBytes } from 'node:crypto';
 import { FastifyInstance } from 'fastify';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
-import { writeAuditLog } from '../../shared/services/audit.service.js';
 import { generateStaffCode } from '../../shared/services/staff.service.js';
 import { sendUserCreationEmail } from '../../shared/services/mail.service.js';
-import { CreateEmployeeInput, EmployeeDto } from './schemas.js';
+import { uploadToCloudinary } from '../../shared/services/cloudinary.service.js';
+import { CreateEmployeeInput, EmployeeDto, UpdateEmployeeInput } from './schemas.js';
 
 export const EMPLOYEE_TTL_HOURS = 48;
 
@@ -19,27 +18,15 @@ export async function createEmployee(
   fastify: FastifyInstance,
   organizationId: string,
   actorUserId: string,
-  actorRole: 'OWNER' | 'MANAGER' | 'STAFF',
+  actorRole: 'OWNER' | 'EMPLOYEE',
   input: CreateEmployeeInput
 ): Promise<EmployeeDto> {
-  if (actorRole === 'OWNER' && input.role !== 'MANAGER' && input.role !== 'STAFF') {
+  if (actorRole !== 'OWNER') {
     throw new AppError(
-      'Owners can add Managers and Staff members.',
+      'Only Organization Owners can add Employees.',
       403,
       'EMPLOYEE_ROLE_NOT_PERMITTED'
     );
-  }
-
-  if (actorRole === 'MANAGER' && input.role !== 'STAFF') {
-    throw new AppError(
-      'Managers can only add Staff members.',
-      403,
-      'EMPLOYEE_ROLE_NOT_PERMITTED'
-    );
-  }
-
-  if (actorRole === 'STAFF') {
-    throw new AppError('Staff members cannot add team members', 403, 'EMPLOYEE_FORBIDDEN');
   }
 
   const email = input.email.toLowerCase().trim();
@@ -68,25 +55,38 @@ export async function createEmployee(
     }
   }
 
-  let assignedPremisesId = input.premisesId || null;
-  if (actorRole === 'MANAGER') {
-    const [managerProfile] = await fastify.db
-      .select({ premisesId: schema.employees.premisesId })
-      .from(schema.employees)
+  // Premises Validation & Assignment
+  let assignedPremisesId: string | null = input.premisesId || null;
+  if (assignedPremisesId) {
+    const [validPremises] = await fastify.db
+      .select({ id: schema.premises.id })
+      .from(schema.premises)
       .where(
         and(
-          eq(schema.employees.userId, actorUserId),
-          eq(schema.employees.organizationId, organizationId),
-          eq(schema.employees.isActive, true)
+          eq(schema.premises.id, assignedPremisesId),
+          eq(schema.premises.organizationId, organizationId)
         )
       )
       .limit(1);
-    if (!managerProfile?.premisesId) {
-      throw new AppError('Manager must be assigned to a premises to add staff', 400, 'MANAGER_PREMISES_REQUIRED');
+
+    if (!validPremises) {
+      throw new AppError(
+        'The specified premises was not found in this organization.',
+        400,
+        'PREMISES_NOT_FOUND'
+      );
     }
-    assignedPremisesId = managerProfile.premisesId;
-  } else if (input.role === 'MANAGER' && !assignedPremisesId) {
-    throw new AppError('A manager must be assigned to a premises', 400, 'PREMISES_REQUIRED_FOR_MANAGER');
+  } else {
+    // If premisesId is not supplied, assign default premises if one exists for organization
+    const [defaultPremises] = await fastify.db
+      .select({ id: schema.premises.id })
+      .from(schema.premises)
+      .where(eq(schema.premises.organizationId, organizationId))
+      .limit(1);
+
+    if (defaultPremises) {
+      assignedPremisesId = defaultPremises.id;
+    }
   }
 
   const [existingEmployee] = await fastify.db
@@ -116,6 +116,18 @@ export async function createEmployee(
 
   const expiresAt = new Date(Date.now() + EMPLOYEE_TTL_HOURS * 60 * 60 * 1000);
 
+  let uploadedAvatarUrl: string | null = null;
+  if (input.avatarBase64) {
+    try {
+      uploadedAvatarUrl = await uploadToCloudinary(input.avatarBase64, 'employee-avatars');
+    } catch (err) {
+      fastify.log.warn({ err }, 'Failed to upload employee avatar to Cloudinary');
+      uploadedAvatarUrl = input.avatarBase64;
+    }
+  } else if (input.avatarUrl) {
+    uploadedAvatarUrl = input.avatarUrl;
+  }
+
   const profile = await fastify.db.transaction(async (tx) => {
     let [userRecord] = await tx
       .select()
@@ -123,16 +135,32 @@ export async function createEmployee(
       .where(eq(schema.users.email, email))
       .limit(1);
 
+    const userPayload: Record<string, any> = {
+      email,
+      fullName,
+      isActive: true,
+      updatedAt: now,
+    };
+    if (input.phone) userPayload.phone = input.phone;
+    if (uploadedAvatarUrl) userPayload.avatarUrl = uploadedAvatarUrl;
+
     if (!userRecord) {
       [userRecord] = await tx
         .insert(schema.users)
-        .values({ email, fullName, isActive: true })
+        .values({
+          email,
+          fullName,
+          isActive: true,
+          phone: input.phone || null,
+          avatarUrl: uploadedAvatarUrl || null,
+        })
         .returning();
-    } else if (!userRecord.isActive) {
-      await tx
+    } else {
+      [userRecord] = await tx
         .update(schema.users)
-        .set({ isActive: true, fullName, updatedAt: now })
-        .where(eq(schema.users.id, userRecord.id));
+        .set(userPayload)
+        .where(eq(schema.users.id, userRecord.id))
+        .returning();
     }
 
     const [employee] = await tx
@@ -141,25 +169,17 @@ export async function createEmployee(
         organizationId,
         userId: userRecord.id,
         premisesId: assignedPremisesId,
-        role: input.role,
+        role: 'EMPLOYEE',
         employeeCode,
         name: fullName,
         department: input.department || null,
         designation: input.designation || null,
+        address: input.address || null,
         hireDate: now.toISOString().slice(0, 10),
       })
       .returning();
 
-    return employee;
-  });
-
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'EMPLOYEE_CREATED',
-    resourceType: 'employee',
-    resourceId: profile.id,
-    metadata: { email, role: input.role },
+    return { employee, userRecord };
   });
 
   const [org] = await fastify.db
@@ -173,7 +193,7 @@ export async function createEmployee(
   setImmediate(() => {
     sendUserCreationEmail({
       to: email,
-      role: input.role,
+      role: 'EMPLOYEE',
       organizationName: orgName,
       logger: fastify.log,
     }).catch((mailErr) => {
@@ -181,33 +201,38 @@ export async function createEmployee(
     });
   });
 
-  const [premisesRecord] = profile.premisesId ? await fastify.db
-    .select({ name: schema.premises.name })
-    .from(schema.premises)
-    .where(eq(schema.premises.id, profile.premisesId))
-    .limit(1) : [null];
+  const [premisesRecord] = profile.employee.premisesId
+    ? await fastify.db
+        .select({ name: schema.premises.name })
+        .from(schema.premises)
+        .where(eq(schema.premises.id, profile.employee.premisesId))
+        .limit(1)
+    : [null];
 
   return {
-    id: profile.id,
+    id: profile.employee.id,
     organizationId,
     organizationName: orgName,
-    userId: profile.userId!,
+    userId: profile.employee.userId!,
     email,
-    fullName: profile.name,
-    staffCode: profile.employeeCode,
-    department: profile.department,
-    designation: profile.designation,
-    role: input.role,
+    fullName: profile.employee.name,
+    staffCode: profile.employee.employeeCode,
+    department: profile.employee.department,
+    designation: profile.employee.designation,
+    phone: profile.userRecord.phone ?? input.phone ?? null,
+    address: profile.employee.address ?? input.address ?? null,
+    avatarUrl: profile.userRecord.avatarUrl ?? uploadedAvatarUrl ?? null,
+    role: 'EMPLOYEE',
     token: null,
     addedBy: actorUserId,
     metadata: null,
     expiresAt: expiresAt.toISOString(),
     acceptedAt: now.toISOString(),
     createdAt: now.toISOString(),
-    premisesId: profile.premisesId,
+    premisesId: profile.employee.premisesId,
     premisesName: premisesRecord?.name ?? null,
-    hireDate: String(profile.hireDate),
-    isActive: profile.isActive,
+    hireDate: String(profile.employee.hireDate),
+    isActive: profile.employee.isActive,
     earnedBalancePaise: 0,
     approvedUnpaidBalancePaise: 0,
     paidBalancePaise: 0,
@@ -216,7 +241,8 @@ export async function createEmployee(
 
 export async function listEmployees(
   fastify: FastifyInstance,
-  organizationId: string
+  organizationId: string,
+  options?: { premisesId?: string; search?: string }
 ): Promise<EmployeeDto[]> {
   const [org] = await fastify.db
     .select({ name: schema.organizations.name })
@@ -226,6 +252,23 @@ export async function listEmployees(
 
   const orgName = org?.name || 'Organization';
 
+  const conditions = [eq(schema.employees.organizationId, organizationId)];
+
+  if (options?.premisesId) {
+    conditions.push(eq(schema.employees.premisesId, options.premisesId));
+  }
+
+  if (options?.search && options.search.trim().length > 0) {
+    const term = `%${options.search.trim()}%`;
+    conditions.push(
+      or(
+        ilike(schema.employees.name, term),
+        ilike(schema.users.email, term),
+        ilike(schema.employees.employeeCode, term)
+      )!
+    );
+  }
+
   const rows = await fastify.db
     .select({
       id: schema.employees.id,
@@ -233,6 +276,9 @@ export async function listEmployees(
       role: schema.employees.role,
       name: schema.employees.name,
       email: schema.users.email,
+      phone: schema.users.phone,
+      avatarUrl: schema.users.avatarUrl,
+      address: schema.employees.address,
       createdAt: schema.employees.createdAt,
       department: schema.employees.department,
       designation: schema.employees.designation,
@@ -245,7 +291,7 @@ export async function listEmployees(
     .from(schema.employees)
     .innerJoin(schema.users, eq(schema.employees.userId, schema.users.id))
     .leftJoin(schema.premises, eq(schema.premises.id, schema.employees.premisesId))
-    .where(eq(schema.employees.organizationId, organizationId))
+    .where(and(...conditions))
     .orderBy(desc(schema.employees.createdAt));
 
   if (rows.length === 0) {
@@ -310,7 +356,10 @@ export async function listEmployees(
       staffCode: row.employeeCode,
       department: row.department,
       designation: row.designation,
-      role: row.role,
+      phone: row.phone ?? null,
+      address: row.address ?? null,
+      avatarUrl: row.avatarUrl ?? null,
+      role: 'EMPLOYEE' as const,
       token: null,
       addedBy: null,
       metadata: null,
@@ -328,6 +377,37 @@ export async function listEmployees(
   });
 }
 
+export async function getEmployeeById(
+  fastify: FastifyInstance,
+  organizationId: string,
+  employeeId: string,
+  actorUserId: string,
+  actorRole: 'OWNER' | 'EMPLOYEE'
+): Promise<EmployeeDto> {
+  const list = await listEmployees(fastify, organizationId);
+  const emp = list.find((e) => e.id === employeeId);
+  if (!emp) {
+    throw new AppError('Employee record not found', 404, 'EMPLOYEE_NOT_FOUND');
+  }
+  return emp;
+}
+
+export async function getSelfEmployeeProfile(
+  fastify: FastifyInstance,
+  organizationId: string,
+  userId: string
+): Promise<EmployeeDto> {
+  const list = await listEmployees(fastify, organizationId);
+  const emp = list.find((e) => e.userId === userId);
+  if (!emp) {
+    throw new AppError(
+      'Employee profile not found for this user account.',
+      404,
+      'EMPLOYEE_NOT_FOUND'
+    );
+  }
+  return emp;
+}
 
 export async function revokeEmployee(
   fastify: FastifyInstance,
@@ -353,7 +433,11 @@ export async function revokeEmployee(
   await fastify.db.transaction(async (tx) => {
     await tx
       .update(schema.employees)
-      .set({ isActive: false, terminationDate: new Date().toISOString().slice(0, 10), updatedAt: new Date() })
+      .set({
+        isActive: false,
+        terminationDate: new Date().toISOString().slice(0, 10),
+        updatedAt: new Date(),
+      })
       .where(eq(schema.employees.id, employeeId));
 
     await tx
@@ -361,15 +445,112 @@ export async function revokeEmployee(
       .where(eq(schema.multiPoseFaceTemplates.employeeId, employeeId));
   });
 
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'EMPLOYEE_REVOKED',
-    resourceType: 'employee',
-    resourceId: employeeId,
-  });
-
   return { revoked: true };
 }
 
+export async function updateEmployee(
+  fastify: FastifyInstance,
+  organizationId: string,
+  employeeId: string,
+  actorUserId: string,
+  actorRole: 'OWNER' | 'EMPLOYEE',
+  input: UpdateEmployeeInput
+): Promise<EmployeeDto> {
+  const [employee] = await fastify.db
+    .select()
+    .from(schema.employees)
+    .where(
+      and(
+        eq(schema.employees.id, employeeId),
+        eq(schema.employees.organizationId, organizationId)
+      )
+    )
+    .limit(1);
 
+  if (!employee) {
+    throw new AppError('Employee record not found', 404, 'EMPLOYEE_NOT_FOUND');
+  }
+
+  if (actorRole === 'EMPLOYEE' && employee.userId !== actorUserId) {
+    throw new AppError(
+      'Employees can only update their own profile.',
+      403,
+      'FORBIDDEN'
+    );
+  }
+
+  if (input.premisesId) {
+    const [validPremises] = await fastify.db
+      .select({ id: schema.premises.id })
+      .from(schema.premises)
+      .where(
+        and(
+          eq(schema.premises.id, input.premisesId),
+          eq(schema.premises.organizationId, organizationId)
+        )
+      )
+      .limit(1);
+
+    if (!validPremises) {
+      throw new AppError(
+        'The specified premises was not found in this organization.',
+        400,
+        'PREMISES_NOT_FOUND'
+      );
+    }
+  }
+
+  let uploadedAvatarUrl: string | undefined = input.avatarUrl ?? undefined;
+  if (input.avatarBase64) {
+    try {
+      uploadedAvatarUrl = await uploadToCloudinary(input.avatarBase64, 'employee-avatars');
+    } catch (err) {
+      fastify.log.warn({ err }, 'Failed to upload employee avatar to Cloudinary');
+      uploadedAvatarUrl = input.avatarBase64;
+    }
+  }
+
+  await fastify.db.transaction(async (tx) => {
+    const empUpdates: Record<string, any> = { updatedAt: new Date() };
+
+    if (input.fullName !== undefined && actorRole === 'OWNER') {
+      empUpdates.name = input.fullName;
+    }
+    if (input.department !== undefined && actorRole === 'OWNER') {
+      empUpdates.department = input.department;
+    }
+    if (input.designation !== undefined && actorRole === 'OWNER') {
+      empUpdates.designation = input.designation;
+    }
+    if (input.premisesId !== undefined && actorRole === 'OWNER') {
+      empUpdates.premisesId = input.premisesId;
+    }
+    if (input.address !== undefined) {
+      empUpdates.address = input.address;
+    }
+
+    await tx
+      .update(schema.employees)
+      .set(empUpdates)
+      .where(eq(schema.employees.id, employeeId));
+
+    if (employee.userId) {
+      const userUpdates: Record<string, any> = { updatedAt: new Date() };
+      if (input.fullName !== undefined) userUpdates.fullName = input.fullName;
+      if (input.phone !== undefined) userUpdates.phone = input.phone;
+      if (uploadedAvatarUrl !== undefined) userUpdates.avatarUrl = uploadedAvatarUrl;
+
+      await tx
+        .update(schema.users)
+        .set(userUpdates)
+        .where(eq(schema.users.id, employee.userId));
+    }
+  });
+
+  const list = await listEmployees(fastify, organizationId);
+  const updated = list.find((e) => e.id === employeeId);
+  if (!updated) {
+    throw new AppError('Updated employee record not found', 500, 'INTERNAL_SERVER_ERROR');
+  }
+  return updated;
+}

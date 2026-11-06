@@ -56,7 +56,7 @@ export async function shiftRoutes(fastify: FastifyInstance) {
   server.post(
     '/api/v1/shifts',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Create a new shift template',
         tags: ['Shifts'],
@@ -81,7 +81,7 @@ export async function shiftRoutes(fastify: FastifyInstance) {
   server.put(
     '/api/v1/shifts/:id',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Update an existing shift template',
         tags: ['Shifts'],
@@ -109,7 +109,7 @@ export async function shiftRoutes(fastify: FastifyInstance) {
   server.patch(
     '/api/v1/shifts/:id',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Partially update an existing shift template',
         tags: ['Shifts'],
@@ -137,7 +137,7 @@ export async function shiftRoutes(fastify: FastifyInstance) {
   server.delete(
     '/api/v1/shifts/:id',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Delete a shift template',
         tags: ['Shifts'],
@@ -197,7 +197,7 @@ export async function shiftRoutes(fastify: FastifyInstance) {
   server.post(
     '/api/v1/shifts/assignments',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Assign a shift to an employee',
         tags: ['Shifts'],
@@ -222,7 +222,7 @@ export async function shiftRoutes(fastify: FastifyInstance) {
   server.put(
     '/api/v1/shifts/assignments/:id',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Update a shift assignment',
         tags: ['Shifts'],
@@ -250,7 +250,7 @@ export async function shiftRoutes(fastify: FastifyInstance) {
   server.patch(
     '/api/v1/shifts/assignments/:id',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Partially update a shift assignment',
         tags: ['Shifts'],
@@ -278,7 +278,7 @@ export async function shiftRoutes(fastify: FastifyInstance) {
   server.delete(
     '/api/v1/shifts/assignments/:id',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Delete a shift assignment',
         tags: ['Shifts'],
@@ -329,7 +329,7 @@ export async function shiftRoutes(fastify: FastifyInstance) {
   server.put(
     '/api/v1/shifts/weekly-offs/:staffProfileId',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Set weekly off days for a staff profile',
         tags: ['Shifts'],

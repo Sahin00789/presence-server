@@ -8,8 +8,8 @@ import { listMonthlyPayrollSummaries } from '../modules/payroll/service.js';
 export async function processMonthlyReports(
   fastify: FastifyInstance,
   now: Date = new Date()
-): Promise<{ ownersMailed: number; managersMailed: number; staffMailed: number }> {
-  // Target previous month by default (e.g. on June 1st, month = 5, year = 2025)
+): Promise<{ ownersMailed: number; staffMailed: number }> {
+  // Target previous month by default
   const targetDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
   const month = targetDate.getMonth() + 1;
   const year = targetDate.getFullYear();
@@ -18,7 +18,6 @@ export async function processMonthlyReports(
   const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
   let ownersMailed = 0;
-  let managersMailed = 0;
   let staffMailed = 0;
 
   // 1. Fetch all active organizations and owners
@@ -46,12 +45,11 @@ export async function processMonthlyReports(
       const ownerTable: ReportTable = {
         title: `Monthly Organization Executive Report (${org.orgName})`,
         subtitle: `Period: ${startDate} to ${endDate}`,
-        columns: ['Staff Code', 'Staff Name', 'Earned', 'Deductions', 'Paid', 'Due', 'Status'],
+        columns: ['Employee Code', 'Employee Name', 'Earned', 'Paid', 'Due', 'Status'],
         rows: payrollSummaries.map((p) => [
           p.staffCode ?? '',
           p.staffName ?? '',
           p.earnedAmount ?? '0.00',
-          p.deductionAmount ?? '0.00',
           p.paidAmount ?? '0.00',
           p.dueAmount ?? '0.00',
           p.status,
@@ -77,7 +75,7 @@ export async function processMonthlyReports(
       fastify.log.warn({ err, orgId: org.orgId }, 'Failed to process owner monthly report');
     }
 
-    // --- Fetch Employees (MANAGERS & STAFF) ---
+    // --- Fetch Employees ---
     const employees = await fastify.db
       .select({
         employeeId: schema.employees.id,
@@ -99,94 +97,51 @@ export async function processMonthlyReports(
 
     for (const emp of employees) {
       try {
-        if (emp.role === 'MANAGER') {
-          // --- Role 2: MANAGER Monthly Report ---
-          const premisesPayroll = await listMonthlyPayrollSummaries(
-            fastify,
-            org.orgId,
-            month,
-            year,
-            emp.premisesId ?? undefined
+        const attendanceEvents = await fastify.db
+          .select()
+          .from(schema.employeeAttendance)
+          .where(
+            and(
+              eq(schema.employeeAttendance.employeeId, emp.employeeId),
+              gte(schema.employeeAttendance.workDate, startDate),
+              lte(schema.employeeAttendance.workDate, endDate)
+            )
           );
 
-          const managerTable: ReportTable = {
-            title: `Monthly Premises Operations Summary (${org.orgName})`,
-            subtitle: `Period: ${startDate} to ${endDate}`,
-            columns: ['Staff Code', 'Staff Name', 'Earned', 'Deductions', 'Paid', 'Due', 'Status'],
-            rows: premisesPayroll.map((p) => [
-              p.staffCode ?? '',
-              p.staffName ?? '',
-              p.earnedAmount ?? '0.00',
-              p.deductionAmount ?? '0.00',
-              p.paidAmount ?? '0.00',
-              p.dueAmount ?? '0.00',
-              p.status,
-            ]),
-          };
+        const staffTable: ReportTable = {
+          title: `Monthly Attendance & Earnings Statement (${emp.fullName})`,
+          subtitle: `Employee Code: ${emp.employeeCode} | Period: ${startDate} to ${endDate}`,
+          columns: ['Work Date', 'Status', 'Worked Minutes', 'Remarks'],
+          rows: attendanceEvents.map((a) => [
+            String(a.workDate),
+            a.status,
+            a.workedMinutes ?? 0,
+            a.remarks ?? '',
+          ]),
+        };
 
-          const pdfReport = renderReport(managerTable, 'pdf', `manager-report-${emp.employeeId}`);
-          const csvReport = renderReport(managerTable, 'csv', `manager-report-${emp.employeeId}`);
+        const pdfReport = renderReport(staffTable, 'pdf', `employee-payslip-${emp.employeeId}`);
+        const csvReport = renderReport(staffTable, 'csv', `employee-payslip-${emp.employeeId}`);
 
-          await sendMonthlyReportEmail({
-            to: emp.email,
-            recipientName: emp.fullName,
-            role: 'MANAGER',
-            organizationName: org.orgName,
-            month,
-            year,
-            pdfBuffer: pdfReport.payload as Buffer,
-            csvContent: csvReport.payload as string,
-            logger: fastify.log,
-          });
-          managersMailed += 1;
-        } else if (emp.role === 'STAFF') {
-          // --- Role 3: STAFF Monthly Payslip & Attendance Report ---
-          const attendanceEvents = await fastify.db
-            .select()
-            .from(schema.employeeAttendance)
-            .where(
-              and(
-                eq(schema.employeeAttendance.employeeId, emp.employeeId),
-                gte(schema.employeeAttendance.workDate, startDate),
-                lte(schema.employeeAttendance.workDate, endDate)
-              )
-            );
-
-          const staffTable: ReportTable = {
-            title: `Monthly Attendance & Earnings Statement (${emp.fullName})`,
-            subtitle: `Staff Code: ${emp.employeeCode} | Period: ${startDate} to ${endDate}`,
-            columns: ['Work Date', 'Status', 'Worked Minutes', 'Remarks'],
-            rows: attendanceEvents.map((a) => [
-              String(a.workDate),
-              a.status,
-              a.workedMinutes ?? 0,
-              a.remarks ?? '',
-            ]),
-          };
-
-          const pdfReport = renderReport(staffTable, 'pdf', `staff-payslip-${emp.employeeId}`);
-          const csvReport = renderReport(staffTable, 'csv', `staff-payslip-${emp.employeeId}`);
-
-          await sendMonthlyReportEmail({
-            to: emp.email,
-            recipientName: emp.fullName,
-            role: 'STAFF',
-            organizationName: org.orgName,
-            month,
-            year,
-            pdfBuffer: pdfReport.payload as Buffer,
-            csvContent: csvReport.payload as string,
-            logger: fastify.log,
-          });
-          staffMailed += 1;
-        }
+        await sendMonthlyReportEmail({
+          to: emp.email,
+          recipientName: emp.fullName,
+          role: 'EMPLOYEE',
+          organizationName: org.orgName,
+          month,
+          year,
+          pdfBuffer: pdfReport.payload as Buffer,
+          csvContent: csvReport.payload as string,
+          logger: fastify.log,
+        });
+        staffMailed += 1;
       } catch (err) {
         fastify.log.warn({ err, employeeId: emp.employeeId }, 'Failed to process employee monthly report');
       }
     }
   }
 
-  return { ownersMailed, managersMailed, staffMailed };
+  return { ownersMailed, staffMailed };
 }
 
 export function startMonthlyReportMailerJob(fastify: FastifyInstance): void {
@@ -198,7 +153,6 @@ export function startMonthlyReportMailerJob(fastify: FastifyInstance): void {
     running = true;
     try {
       const now = new Date();
-      // Only execute on 1st day of the month or when manually invoked
       if (now.getDate() === 1) {
         await processMonthlyReports(fastify, now);
       }
@@ -210,7 +164,6 @@ export function startMonthlyReportMailerJob(fastify: FastifyInstance): void {
   };
 
   fastify.addHook('onListen', async () => {
-    // Initial delay 6 seconds on server start, then check every 12 hours
     setTimeout(run, 6000);
     timer = setInterval(run, 12 * 60 * 60 * 1000);
     timer.unref?.();

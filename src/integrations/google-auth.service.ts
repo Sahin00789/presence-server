@@ -1,3 +1,4 @@
+import { OAuth2Client } from 'google-auth-library';
 import { env } from '../config/env.js';
 import { AppError } from '../shared/errors/app-error.js';
 import type { FastifyBaseLogger } from 'fastify';
@@ -22,10 +23,15 @@ export interface ExchangeCodeOptions {
 }
 
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
-const GOOGLE_TOKENINFO_ENDPOINT = 'https://oauth2.googleapis.com/tokeninfo';
 const GOOGLE_ISSUERS = new Set(['accounts.google.com', 'https://accounts.google.com']);
 
 export class GoogleAuthService {
+  private oauth2Client: OAuth2Client;
+
+  constructor() {
+    this.oauth2Client = new OAuth2Client();
+  }
+
   /** Client IDs whose ID tokens are accepted: the primary client plus any extra (Android/installed) clients. */
   allowedAudiences(): string[] {
     const extra = (env.GOOGLE_EXTRA_CLIENT_IDS ?? '')
@@ -38,6 +44,59 @@ export class GoogleAuthService {
 
   isAllowedAudience(audience?: string): boolean {
     return Boolean(audience) && this.allowedAudiences().includes(audience!);
+  }
+
+  /**
+   * Verifies a Google ID token using google-auth-library.
+   * This is the path used by Android Credential Manager / Google ID Token flow.
+   */
+  async verifyIdToken(
+    idToken: string,
+    logger?: FastifyBaseLogger
+  ): Promise<GoogleUserProfile> {
+    try {
+      const audiences = this.allowedAudiences();
+      const ticket = await this.oauth2Client.verifyIdToken({
+        idToken,
+        audience: audiences.length === 1 ? audiences[0] : audiences,
+      });
+
+      const payload = ticket.getPayload();
+      if (!payload || !payload.sub || !payload.email) {
+        throw new AppError('Google did not return a usable account identity', 401, 'INVALID_PROFILE');
+      }
+
+      if (payload.iss && !GOOGLE_ISSUERS.has(payload.iss)) {
+        logger?.warn({ iss: payload.iss }, 'Google token issuer mismatch');
+        throw new AppError('Google ID token issuer is invalid', 401, 'INVALID_ISSUER');
+      }
+
+      if (payload.email_verified !== true) {
+        throw new AppError('Google account email is not verified', 401, 'EMAIL_NOT_VERIFIED');
+      }
+
+      if (!this.isAllowedAudience(payload.aud)) {
+        logger?.warn(
+          { aud: payload.aud, allowed: audiences },
+          'Google token audience mismatch'
+        );
+        throw new AppError('Google ID token audience is invalid', 401, 'INVALID_AUDIENCE');
+      }
+
+      const email = payload.email.toLowerCase().trim();
+      return {
+        googleSub: payload.sub,
+        email,
+        fullName: payload.name?.trim() || email.split('@')[0] || 'Google User',
+        picture: payload.picture || null,
+      };
+    } catch (err) {
+      if (err instanceof AppError) {
+        throw err;
+      }
+      logger?.error({ err }, 'Unexpected error verifying Google ID token with google-auth-library');
+      throw new AppError('Failed to verify Google identity', 401, 'INVALID_ID_TOKEN');
+    }
   }
 
   /**
@@ -110,70 +169,6 @@ export class GoogleAuthService {
       }
       logger?.error({ err }, 'Unexpected error during Google OAuth authentication');
       throw new AppError('Failed to complete Google authentication', 500, 'GOOGLE_AUTH_ERROR');
-    }
-  }
-
-  /**
-   * Verifies a Google ID token issued to any of the configured client IDs.
-   * This is the path used by Android Credential Manager / GoogleSignIn.
-   */
-  async verifyIdToken(
-    idToken: string,
-    logger?: FastifyBaseLogger
-  ): Promise<GoogleUserProfile> {
-    try {
-      const verifyResponse = await fetch(
-        `${GOOGLE_TOKENINFO_ENDPOINT}?id_token=${encodeURIComponent(idToken)}`
-      );
-
-      if (!verifyResponse.ok) {
-        throw new AppError('Google ID token verification failed', 401, 'INVALID_ID_TOKEN');
-      }
-
-      const payload = (await verifyResponse.json()) as {
-        sub?: string;
-        email?: string;
-        email_verified?: string | boolean;
-        name?: string;
-        picture?: string;
-        aud?: string;
-        iss?: string;
-      };
-
-      if (!payload.sub || !payload.email) {
-        throw new AppError('Google did not return a usable account identity', 401, 'INVALID_PROFILE');
-      }
-
-      if (payload.iss && !GOOGLE_ISSUERS.has(payload.iss)) {
-        logger?.warn({ iss: payload.iss }, 'Google token issuer mismatch');
-        throw new AppError('Google ID token issuer is invalid', 401, 'INVALID_ISSUER');
-      }
-
-      if (payload.email_verified !== true && payload.email_verified !== 'true') {
-        throw new AppError('Google account email is not verified', 401, 'EMAIL_NOT_VERIFIED');
-      }
-
-      if (!this.isAllowedAudience(payload.aud)) {
-        logger?.warn(
-          { aud: payload.aud, allowed: this.allowedAudiences() },
-          'Google token audience mismatch'
-        );
-        throw new AppError('Google ID token audience is invalid', 401, 'INVALID_AUDIENCE');
-      }
-
-      const email = payload.email.toLowerCase().trim();
-      return {
-        googleSub: payload.sub,
-        email,
-        fullName: payload.name?.trim() || email.split('@')[0] || 'Google User',
-        picture: payload.picture || null,
-      };
-    } catch (err) {
-      if (err instanceof AppError) {
-        throw err;
-      }
-      logger?.error({ err }, 'Unexpected error verifying Google ID token');
-      throw new AppError('Failed to verify Google identity', 500, 'GOOGLE_AUTH_ERROR');
     }
   }
 }

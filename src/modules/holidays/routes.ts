@@ -34,7 +34,7 @@ export async function holidayRoutes(fastify: FastifyInstance) {
   server.post(
     '/api/v1/holidays',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Create a holiday',
         tags: ['Holidays'],
@@ -58,7 +58,7 @@ export async function holidayRoutes(fastify: FastifyInstance) {
   server.patch(
     '/api/v1/holidays/:holidayId',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Update a holiday',
         tags: ['Holidays'],
@@ -85,7 +85,7 @@ export async function holidayRoutes(fastify: FastifyInstance) {
   server.delete(
     '/api/v1/holidays/:holidayId',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Delete a holiday',
         tags: ['Holidays'],

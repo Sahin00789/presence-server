@@ -17,7 +17,7 @@ export async function overtimeRoutes(fastify: FastifyInstance) {
       preHandler: [fastify.authenticate],
       schema: {
         description:
-          'List overtime entries. Staff receive their own, Owners and Managers receive the whole organization.',
+          'List overtime entries. Employees receive their own, Owners receive the whole organization.',
         tags: ['Overtime'],
         querystring: overtimeListQuerySchema,
         response: {
@@ -39,10 +39,10 @@ export async function overtimeRoutes(fastify: FastifyInstance) {
   server.post(
     '/api/v1/overtime',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description:
-          'Raise an overtime entry for a staff member, or for yourself when no staff member is given.',
+          'Raise an overtime entry for an employee.',
         tags: ['Overtime'],
         body: createOvertimeSchema,
         response: {
@@ -64,7 +64,7 @@ export async function overtimeRoutes(fastify: FastifyInstance) {
   server.post(
     '/api/v1/overtime/:overtimeId/cancel',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Cancel an overtime entry that has not been worked yet',
         tags: ['Overtime'],

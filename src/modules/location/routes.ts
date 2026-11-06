@@ -61,7 +61,7 @@ export async function locationRoutes(fastify: FastifyInstance) {
   server.get(
     '/api/v1/location/presence',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER', 'STAFF')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'EMPLOYEE')],
       schema: {
         description: 'Get today staff presence cards and GPS ping records for a premises location',
         tags: ['Location'],

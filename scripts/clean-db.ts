@@ -3,6 +3,9 @@ import dotenv from 'dotenv';
 import path from 'path';
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
+if (!process.env.DATABASE_URL) {
+  dotenv.config({ path: path.resolve(process.cwd(), '.env') });
+}
 
 const connectionString = process.env.DATABASE_URL;
 
@@ -16,39 +19,24 @@ async function cleanDatabase() {
   const sql = postgres(connectionString);
 
   try {
-    console.log('Truncating all tables with CASCADE...');
-    await sql`
-      TRUNCATE TABLE
-        audit_logs,
-        clock_nonces,
-        overtime,
-        leave_requests,
-        unworked_payment_rules,
-        weekly_offs,
-        holiday_calendars,
-        payroll_transactions,
-        payroll_deductions,
-        staff_earning_ledger,
-        monthly_payrolls,
-        monthly_attendance_stats,
-        location_check_events,
-        location_monitoring_sessions,
-        attendance_events,
-        daily_attendance,
-        employee_shift_assignments,
-        shifts,
-        multi_pose_face_templates,
-        employees,
-        premises,
-        logged_devices,
-        google_identities,
-        otp_requests,
-        owners,
-        users,
-        organizations
-      CASCADE;
+    console.log('Fetching all table names from public schema...');
+    const tables = await sql<{ tablename: string }[]>`
+      SELECT tablename
+      FROM pg_tables
+      WHERE schemaname = 'public'
+        AND tablename != '__drizzle_migrations'
     `;
-    console.log('All database data has been successfully deleted/wiped.');
+
+    if (tables.length === 0) {
+      console.log('No data tables found in public schema to truncate.');
+      return;
+    }
+
+    const tableNames = tables.map((t) => `"${t.tablename}"`).join(', ');
+    console.log(`Truncating tables: ${tables.map((t) => t.tablename).join(', ')}`);
+
+    await sql.unsafe(`TRUNCATE TABLE ${tableNames} CASCADE;`);
+    console.log('All database tables have been successfully truncated and data completely wiped.');
   } catch (err) {
     console.error('Error wiping database:', err);
     process.exit(1);
@@ -58,3 +46,4 @@ async function cleanDatabase() {
 }
 
 cleanDatabase();
+

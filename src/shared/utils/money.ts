@@ -73,7 +73,7 @@ export function formatMinorUnits(amountPaise: number, currency: CurrencyCode = '
 }
 
 /**
- * Clamps a value to be non-negative. Deductions and payouts can never be negative.
+ * Clamps a value to be non-negative. Payouts can never be negative.
  */
 export function clampNonNegative(value: number): number {
   return value < 0 ? 0 : value;

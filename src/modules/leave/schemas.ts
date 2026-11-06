@@ -1,9 +1,28 @@
 import { z } from 'zod';
 
-export const createLeaveRequestSchema = z.object({
+export const assignedShiftIdWithDateSchema = z.object({
   shiftAssignmentId: z.string().uuid(),
   workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'workDate must be in YYYY-MM-DD format'),
+});
+
+export const createLeaveRequestSchema = z.object({
+  shiftAssignmentId: z.string().uuid().optional(),
+  workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'workDate must be in YYYY-MM-DD format').optional(),
+  assignedShiftIdWithDate: z.array(assignedShiftIdWithDateSchema).optional(),
+  assignedshiftidwithdate: z.array(assignedShiftIdWithDateSchema).optional(),
   reason: z.string().trim().min(2, 'Reason must be at least 2 characters').max(1000),
+});
+
+export const upcomingShiftSchema = z.object({
+  shiftAssignmentId: z.string().uuid(),
+  shiftId: z.string().uuid(),
+  shiftName: z.string(),
+  workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  dayOfWeek: z.string(),
+  startTime: z.string().nullable().optional(),
+  endTime: z.string().nullable().optional(),
+  premisesName: z.string().nullable().optional(),
+  alreadyRequested: z.boolean(),
 });
 
 export const reviewLeaveRequestSchema = z.object({

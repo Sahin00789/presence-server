@@ -1,7 +1,7 @@
 import fp from 'fastify-plugin';
 import { FastifyRequest, FastifyReply } from 'fastify';
 
-type Role = 'OWNER' | 'MANAGER' | 'STAFF';
+type Role = 'OWNER' | 'EMPLOYEE';
 
 declare module 'fastify' {
   interface FastifyInstance {

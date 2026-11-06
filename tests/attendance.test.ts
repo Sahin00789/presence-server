@@ -15,10 +15,10 @@ import {
 } from '../src/shared/utils/datetime.js';
 
 describe('Attendance status rules', () => {
-  it('marks a short shift as HALF_DAY and keeps LATE otherwise', () => {
+  it('marks a short shift as HALF_DAY and a full shift as PRESENT', () => {
     const halfDay = resolveClockOutResult({
       attendanceType: 'SHIFT',
-      existingStatus: 'LATE',
+      existingStatus: 'PRESENT',
       workedMinutes: 120,
       scheduledMinutes: 480,
       halfDayThresholdMinutes: 240,
@@ -29,12 +29,12 @@ describe('Attendance status rules', () => {
 
     const late = resolveClockOutResult({
       attendanceType: 'SHIFT',
-      existingStatus: 'LATE',
+      existingStatus: 'PRESENT',
       workedMinutes: 480,
       scheduledMinutes: 480,
       halfDayThresholdMinutes: 240,
     });
-    expect(late.status).toBe('LATE');
+    expect(late.status).toBe('PRESENT');
     expect(late.earlyDeparture).toBe(false);
 
     const present = resolveClockOutResult({

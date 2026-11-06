@@ -14,7 +14,7 @@ import {
   listOwnerUserIds,
   resolveNotificationTargets,
 } from '../../shared/services/staff.service.js';
-import { addDays, toDateISOInTimeZone } from '../../shared/utils/datetime.js';
+import { addDays, isOvernightShift, toDateISOInTimeZone } from '../../shared/utils/datetime.js';
 import { getAssignedDayNumbers, resolveTimezone } from '../shifts/service.js';
 import {
   GpsPingSummary,
@@ -414,7 +414,7 @@ export async function getActiveLocationSession(
 
 export async function getTodayLocationPresence(
   fastify: FastifyInstance,
-  user: { userId: string; role: 'OWNER' | 'MANAGER' | 'STAFF' },
+  user: { userId: string; role: 'OWNER' | 'EMPLOYEE' },
   organizationId: string,
   premisesIdParam?: string,
   dateParam?: string
@@ -461,8 +461,10 @@ export async function getTodayLocationPresence(
   if (premisesIdParam) {
     const found = allPremises.find((p) => p.id === premisesIdParam);
     if (found) targetPremises = found;
-  } else if (user.role === 'MANAGER') {
-    const [managerProfile] = await fastify.db
+  } else if (user.role === 'EMPLOYEE') {
+    // Default to the caller's own premises so a manager/staff member always
+    // gets their own presence card, even when no premisesId is supplied.
+    const [callerProfile] = await fastify.db
       .select({ premisesId: schema.employees.premisesId })
       .from(schema.employees)
       .where(
@@ -474,8 +476,8 @@ export async function getTodayLocationPresence(
       )
       .limit(1);
 
-    if (managerProfile?.premisesId) {
-      const found = allPremises.find((p) => p.id === managerProfile.premisesId);
+    if (callerProfile?.premisesId) {
+      const found = allPremises.find((p) => p.id === callerProfile.premisesId);
       if (found) targetPremises = found;
     }
   }
@@ -526,6 +528,16 @@ export async function getTodayLocationPresence(
     const overtimeEvent =
       attendanceRows.find((row) => row.attendanceType === 'OVERTIME') ?? null;
 
+    // GPS counters and pings must follow the session that is actually running:
+    // prefer an open overtime, then an open shift, then fall back to whichever exists.
+    const activeSessionEvent =
+      (overtimeEvent?.clockInAt && !overtimeEvent.clockOutAt
+        ? overtimeEvent
+        : null) ??
+      (shiftEvent?.clockInAt && !shiftEvent.clockOutAt ? shiftEvent : null) ??
+      shiftEvent ??
+      overtimeEvent;
+
     // Fetch all active shift assignments for this staff member
     const allAssignments = await fastify.db
       .select({
@@ -557,26 +569,37 @@ export async function getTodayLocationPresence(
       workDate: string;
     } | null = null;
 
-    for (let d = 0; d < 7; d++) {
-      const checkDateStr = addDays(targetDate, d);
-      const checkDateObj = new Date(`${checkDateStr}T00:00:00Z`);
-      const checkDow = checkDateObj.getUTCDay();
-      const checkDayName = dayNames[checkDow] ?? 'Monday';
+    // Check if an assignment applies to targetDate (today)
+    const todayDow = new Date(`${targetDate}T00:00:00Z`).getUTCDay();
+    const todayMatch = allAssignments.find((a) =>
+      getAssignedDayNumbers(a.dayName).includes(todayDow)
+    );
 
-      const match = allAssignments.find((a) =>
-        getAssignedDayNumbers(a.dayName).includes(checkDow)
+    if (todayMatch) {
+      scheduledShift = {
+        shiftName: todayMatch.shiftName,
+        startTime: String(todayMatch.startTime),
+        endTime: String(todayMatch.endTime),
+        presentPay: todayMatch.presentPay ? String(todayMatch.presentPay) : null,
+        dayOfWeekStr: dayNames[todayDow] ?? 'Monday',
+        workDate: targetDate,
+      };
+    } else {
+      // Check if yesterday's shift was overnight and active
+      const yesterdayDate = addDays(targetDate, -1);
+      const yestDow = new Date(`${yesterdayDate}T00:00:00Z`).getUTCDay();
+      const yestMatch = allAssignments.find((a) =>
+        getAssignedDayNumbers(a.dayName).includes(yestDow)
       );
-
-      if (match) {
+      if (yestMatch && isOvernightShift(yestMatch.startTime, yestMatch.endTime)) {
         scheduledShift = {
-          shiftName: match.shiftName,
-          startTime: String(match.startTime),
-          endTime: String(match.endTime),
-          presentPay: match.presentPay ? String(match.presentPay) : null,
-          dayOfWeekStr: checkDayName,
-          workDate: checkDateStr,
+          shiftName: yestMatch.shiftName,
+          startTime: String(yestMatch.startTime),
+          endTime: String(yestMatch.endTime),
+          presentPay: yestMatch.presentPay ? String(yestMatch.presentPay) : null,
+          dayOfWeekStr: dayNames[yestDow] ?? 'Yesterday',
+          workDate: yesterdayDate,
         };
-        break;
       }
     }
 
@@ -644,12 +667,12 @@ export async function getTodayLocationPresence(
       }
     }
 
-    const pings = shiftEvent
+    const pings = activeSessionEvent
       ? await fastify.db
           .select()
           .from(schema.attendanceLocationPings)
           .where(
-            eq(schema.attendanceLocationPings.attendanceId, shiftEvent.id)
+            eq(schema.attendanceLocationPings.attendanceId, activeSessionEvent.id)
           )
           .orderBy(desc(schema.attendanceLocationPings.checkedAt))
       : [];
@@ -662,19 +685,21 @@ export async function getTodayLocationPresence(
         : null;
 
     let missedCount = 0;
-    if (shiftEvent?.clockInAt) {
-      const clockInMs = new Date(shiftEvent.clockInAt).getTime();
-      const endMs = shiftEvent.clockOutAt
-        ? new Date(shiftEvent.clockOutAt).getTime()
+    if (activeSessionEvent?.clockInAt) {
+      const clockInMs = new Date(activeSessionEvent.clockInAt).getTime();
+      const endMs = activeSessionEvent.clockOutAt
+        ? new Date(activeSessionEvent.clockOutAt).getTime()
         : Date.now();
       const expectedIntervals = Math.floor(
         Math.max(0, endMs - clockInMs) / (10 * 60_000)
       );
-      // Missed count = expected intervals not yet submitted (accounting for last 3 stored)
-      missedCount = Math.max(0, expectedIntervals - pings.length);
-      if (missedCount > 0 && pings.length === 0) {
-        missedCount = expectedIntervals;
-      }
+      // Only the last 3 pings are retained, so compare the expected 10-minute
+      // intervals against the cumulative submitted-ping counters instead of
+      // the stored rows (which would otherwise over-report misses).
+      const submittedPings =
+        (activeSessionEvent.insidePingCount ?? 0) +
+        (activeSessionEvent.outsidePingCount ?? 0);
+      missedCount = Math.max(0, expectedIntervals - submittedPings);
     }
 
     let locationStatus:
@@ -683,14 +708,14 @@ export async function getTodayLocationPresence(
       | 'GPS Uncertain'
       | 'GPS Unavailable' = 'GPS Unavailable';
 
-    if (shiftEvent?.lastPingResult === 'IN_PREMISES') {
+    if (activeSessionEvent?.lastPingResult === 'IN_PREMISES') {
       locationStatus = 'Inside';
     } else if (
-      shiftEvent?.lastPingResult === 'OUTSIDE' ||
-      shiftEvent?.lastPingResult === 'MOCKED'
+      activeSessionEvent?.lastPingResult === 'OUTSIDE' ||
+      activeSessionEvent?.lastPingResult === 'MOCKED'
     ) {
       locationStatus = 'Outside';
-    } else if (shiftEvent?.lastPingResult === 'LOW_ACCURACY') {
+    } else if (activeSessionEvent?.lastPingResult === 'LOW_ACCURACY') {
       locationStatus = 'GPS Uncertain';
     }
 
@@ -773,12 +798,12 @@ export async function getTodayLocationPresence(
           : 'NOT_SCHEDULED',
       hasOvertimeToday: Boolean(overtimeRecord),
       overtimeId: overtimeRecord?.id ?? null,
-      consecutiveFailures: shiftEvent?.consecutivePingFailures ?? 0,
+      consecutiveFailures: activeSessionEvent?.consecutivePingFailures ?? 0,
       exceptionId: openExceptionId,
       earnedAmountPaise,
       counts: {
-        inside: shiftEvent?.insidePingCount ?? 0,
-        outside: shiftEvent?.outsidePingCount ?? 0,
+        inside: activeSessionEvent?.insidePingCount ?? 0,
+        outside: activeSessionEvent?.outsidePingCount ?? 0,
         missed: missedCount,
       },
       latestPings,

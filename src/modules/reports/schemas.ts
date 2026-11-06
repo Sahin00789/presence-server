@@ -13,21 +13,12 @@ export const payrollReportQuerySchema = z.object({
   format: reportFormatSchema,
 });
 
-export const auditReportQuerySchema = z.object({
-  from: z.string().datetime().optional(),
-  to: z.string().datetime().optional(),
-  action: z.string().optional(),
-  resourceType: z.string().optional(),
-  format: reportFormatSchema,
-});
-
 export const dashboardSummarySchema = z.object({
-  role: z.enum(['OWNER', 'MANAGER', 'STAFF']),
+  role: z.enum(['OWNER', 'EMPLOYEE']),
   generatedAt: z.string(),
   organization: z.object({
     staffCount: z.number().int().optional(),
     presentToday: z.number().int().optional(),
-    lateToday: z.number().int().optional(),
     absentToday: z.number().int().optional(),
     leaveToday: z.number().int().optional(),
     openExceptions: z.number().int().optional(),

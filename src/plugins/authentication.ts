@@ -9,7 +9,7 @@ export interface UserJwtPayload {
   userId: string;
   googleSub: string;
   organizationId: string;
-  role: 'OWNER' | 'MANAGER' | 'STAFF';
+  role: 'OWNER' | 'EMPLOYEE';
   jti: string;
 }
 
@@ -103,9 +103,6 @@ export default fp(async (fastify) => {
       }
 
       // 3. PostgreSQL Organization Access Verification
-      // Owners are identified by organizations.owner_user_id; Managers and
-      // Staff by their active employee record. Roles are re-read from the
-      // database so a stale token can never retain elevated privileges.
       const [organization] = await fastify.db
         .select({ ownerUserId: schema.organizations.ownerUserId })
         .from(schema.organizations)
@@ -123,7 +120,7 @@ export default fp(async (fastify) => {
         });
       }
 
-      let authoritativeRole: 'OWNER' | 'MANAGER' | 'STAFF' | null = null;
+      let authoritativeRole: 'OWNER' | 'EMPLOYEE' | null = null;
       if (organization.ownerUserId === payload.userId) {
         authoritativeRole = 'OWNER';
       } else {

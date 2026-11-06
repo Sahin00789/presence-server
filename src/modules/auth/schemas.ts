@@ -1,16 +1,20 @@
 import { z } from 'zod';
 
-export const roleSchema = z.enum(['OWNER', 'MANAGER', 'STAFF']);
+export const roleSchema = z.preprocess(
+  (val) => (val === 'STAFF' || val === 'MANAGER' ? 'EMPLOYEE' : val),
+  z.enum(['OWNER', 'EMPLOYEE'])
+);
 
 export const otpRequestSchema = z.object({
   email: z.string().email().trim().toLowerCase(),
-  role: roleSchema.optional().default('STAFF'),
+  role: roleSchema.optional().default('EMPLOYEE'),
+  isRegistration: z.boolean().optional().default(false),
 });
 
 export const otpVerifySchema = z.object({
   email: z.string().email().trim().toLowerCase(),
   code: z.string().trim().regex(/^\d{6}$/, 'OTP must be 6 digits'),
-  role: roleSchema.optional().default('STAFF'),
+  role: roleSchema.optional().default('EMPLOYEE'),
   fullName: z.string().trim().min(2).optional(),
   organizationName: z.string().trim().min(2).optional(),
   timezone: z.string().optional(),

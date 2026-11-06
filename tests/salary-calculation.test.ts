@@ -25,19 +25,17 @@ function sumEarningLedger(entries: EarningLedgerEntry[]): number {
 }
 
 /**
- * Calculates monthly payroll summary based on ledger total, deductions, and payments.
+ * Calculates monthly payroll summary based on ledger total and payments.
  */
 function calculateMonthlyPayroll(params: {
   ledgerEntries: EarningLedgerEntry[];
-  deductionsCents: number;
   paidCents: number;
 }) {
   const earnedCents = sumEarningLedger(params.ledgerEntries);
-  const dueCents = Math.max(0, earnedCents - params.deductionsCents - params.paidCents);
+  const dueCents = Math.max(0, earnedCents - params.paidCents);
   return {
     earnedAmount: (earnedCents / 100).toFixed(2),
     earnedCents,
-    deductionAmount: (params.deductionsCents / 100).toFixed(2),
     paidAmount: (params.paidCents / 100).toFixed(2),
     dueAmount: (dueCents / 100).toFixed(2),
     dueCents,
@@ -56,18 +54,16 @@ describe('Ledger-Dependent Salary & Payroll Engine', () => {
 
     const payroll = calculateMonthlyPayroll({
       ledgerEntries: entries,
-      deductionsCents: 200_00, // 200.00 deduction
       paidCents: 1000_00,      // 1000.00 already paid
     });
 
     // 1000 + 1000 + 800 + 800 + 350 = 3950.00
     expect(payroll.earnedAmount).toBe('3950.00');
     expect(payroll.earnedCents).toBe(3950_00);
-    expect(payroll.deductionAmount).toBe('200.00');
     expect(payroll.paidAmount).toBe('1000.00');
-    // 3950 - 200 - 1000 = 2750.00
-    expect(payroll.dueAmount).toBe('2750.00');
-    expect(payroll.dueCents).toBe(2750_00);
+    // 3950 - 1000 = 2950.00
+    expect(payroll.dueAmount).toBe('2950.00');
+    expect(payroll.dueCents).toBe(2950_00);
   });
 
   it('updates earning ledger with leavePay when approved leave shift ends', () => {
@@ -109,7 +105,6 @@ describe('Ledger-Dependent Salary & Payroll Engine', () => {
 
     const payroll = calculateMonthlyPayroll({
       ledgerEntries,
-      deductionsCents: 0,
       paidCents: 0,
     });
     expect(payroll.earnedAmount).toBe('600.00');
@@ -141,7 +136,6 @@ describe('Ledger-Dependent Salary & Payroll Engine', () => {
     const ledgerEntries: EarningLedgerEntry[] = [];
     const payroll = calculateMonthlyPayroll({
       ledgerEntries,
-      deductionsCents: 0,
       paidCents: 0,
     });
 
@@ -176,7 +170,6 @@ describe('Ledger-Dependent Salary & Payroll Engine', () => {
 
     const payroll = calculateMonthlyPayroll({
       ledgerEntries,
-      deductionsCents: 0,
       paidCents: 0,
     });
     expect(payroll.earnedAmount).toBe('800.00');

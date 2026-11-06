@@ -2,9 +2,9 @@ import { FastifyInstance } from 'fastify';
 import { and, desc, eq, gte, inArray, lte, or, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
-import { listOrganizationStaff } from '../../shared/services/staff.service.js';
-import { writeAuditLog } from '../../shared/services/audit.service.js';
+import { findStaffProfile, listOrganizationStaff } from '../../shared/services/staff.service.js';
 import { dayOfWeek, enumerateDates } from '../../shared/utils/datetime.js';
+import { buildPdfReport, PdfTable } from '../../shared/utils/pdf.js';
 
 function getMonthDateRange(year: number, month: number) {
   const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
@@ -15,34 +15,9 @@ function getMonthDateRange(year: number, month: number) {
 }
 
 /**
- * 1. Get monthly attendance statistics for a staff member, premises, month, and year.
+ * 1. Get monthly attendance statistics dynamically (calculated on-the-fly).
  */
 export async function getMonthlyAttendanceStats(
-  fastify: FastifyInstance,
-  organizationId: string,
-  month: number,
-  year: number,
-  premisesId?: string,
-  staffProfileId?: string
-) {
-  const conditions = [
-    eq(schema.monthlyAttendanceStats.organizationId, organizationId),
-    eq(schema.monthlyAttendanceStats.month, month),
-    eq(schema.monthlyAttendanceStats.year, year),
-  ];
-  if (premisesId) conditions.push(eq(schema.monthlyAttendanceStats.premisesId, premisesId));
-  if (staffProfileId) conditions.push(eq(schema.monthlyAttendanceStats.employeeId, staffProfileId));
-
-  return await fastify.db
-    .select()
-    .from(schema.monthlyAttendanceStats)
-    .where(and(...conditions));
-}
-
-/**
- * 10. Refresh or rebuild monthly attendance statistics from authoritative records.
- */
-export async function rebuildMonthlyAttendanceStats(
   fastify: FastifyInstance,
   organizationId: string,
   month: number,
@@ -56,6 +31,7 @@ export async function rebuildMonthlyAttendanceStats(
     (s) => (!premisesId || s.premisesId === premisesId) && (!staffProfileId || s.id === staffProfileId)
   );
 
+  const stats = [];
   for (const staff of filteredStaff) {
     const premId = staff.premisesId;
     if (!premId) continue;
@@ -89,6 +65,7 @@ export async function rebuildMonthlyAttendanceStats(
       .where(
         and(
           eq(schema.holidayCalendars.organizationId, organizationId),
+          staff.premisesId ? eq(schema.holidayCalendars.premisesId, staff.premisesId) : sql`true`,
           gte(schema.holidayCalendars.date, startDate),
           sql`${schema.holidayCalendars.date} < ${nextMonthStartDate}`
         )
@@ -101,10 +78,9 @@ export async function rebuildMonthlyAttendanceStats(
       .where(eq(schema.weeklyOffs.employeeId, staff.id));
 
     let offDayCount = 0;
-    const [yNum, mNum] = [year, month];
-    const daysInMonth = new Date(yNum, mNum, 0).getDate();
+    const daysInMonth = new Date(year, month, 0).getDate();
     for (let d = 1; d <= daysInMonth; d++) {
-      const dayOfWeek = new Date(yNum, mNum - 1, d).getDay();
+      const dayOfWeek = new Date(year, month - 1, d).getDay();
       if (weeklyOffs.some((wo) => wo.dayOfWeek === dayOfWeek)) {
         offDayCount++;
       }
@@ -124,42 +100,22 @@ export async function rebuildMonthlyAttendanceStats(
       );
     const overtimeCount = overtimeRecords.length;
 
-    await fastify.db
-      .insert(schema.monthlyAttendanceStats)
-      .values({
-        organizationId,
-        premisesId: premId,
-        employeeId: staff.id,
-        month,
-        year,
-        presentShiftsCount: present,
-        absentShiftsCount: absent,
-        leaveShiftsCount: leave,
-        halfDayShiftsCount: halfDay,
-        holidayCount,
-        offDayCount,
-        overtimeCount,
-      })
-      .onConflictDoUpdate({
-        target: [
-          schema.monthlyAttendanceStats.organizationId,
-          schema.monthlyAttendanceStats.premisesId,
-          schema.monthlyAttendanceStats.employeeId,
-          schema.monthlyAttendanceStats.month,
-          schema.monthlyAttendanceStats.year,
-        ],
-        set: {
-          presentShiftsCount: present,
-          absentShiftsCount: absent,
-          leaveShiftsCount: leave,
-          halfDayShiftsCount: halfDay,
-          holidayCount,
-          offDayCount,
-          overtimeCount,
-          updatedAt: new Date(),
-        },
-      });
+    stats.push({
+      organizationId,
+      premisesId: premId,
+      employeeId: staff.id,
+      month,
+      year,
+      presentShiftsCount: present,
+      absentShiftsCount: absent,
+      leaveShiftsCount: leave,
+      halfDayShiftsCount: halfDay,
+      holidayCount,
+      offDayCount,
+      overtimeCount,
+    });
   }
+  return stats;
 }
 
 /**
@@ -386,6 +342,7 @@ export async function generateDailyEarningLedgerEntries(
       .where(
         and(
           eq(schema.holidayCalendars.organizationId, organizationId),
+          staff.premisesId ? eq(schema.holidayCalendars.premisesId, staff.premisesId) : sql`true`,
           gte(schema.holidayCalendars.date, startDate),
           sql`${schema.holidayCalendars.date} < ${nextMonthStartDate}`
         )
@@ -518,7 +475,6 @@ export async function getOrGenerateMonthlyPayroll(
   month: number,
   year: number
 ) {
-  await rebuildMonthlyAttendanceStats(fastify, organizationId, month, year, premisesId, staffProfileId);
   await generateDailyEarningLedgerEntries(fastify, organizationId, premisesId, staffProfileId, month, year);
 
   let [payroll] = await fastify.db
@@ -545,7 +501,6 @@ export async function getOrGenerateMonthlyPayroll(
         month,
         year,
         earnedAmount: '0.00',
-        deductionAmount: '0.00',
         paidAmount: '0.00',
         dueAmount: '0.00',
         status: 'OPEN',
@@ -573,7 +528,7 @@ async function reconcileMonthlyPayrollById(fastify: FastifyInstance, payrollId: 
 
   const { startDate, nextMonthStartDate } = getMonthDateRange(payroll.year, payroll.month);
 
-  const earningLedger = (schema as any).employeeEarningLedger;
+  const earningLedger = schema.employeeEarningLedger;
   const [earnedResult] = await fastify.db
     .select({
       total: sql<string>`COALESCE(SUM(${earningLedger.amount}), 0)`,
@@ -590,15 +545,6 @@ async function reconcileMonthlyPayrollById(fastify: FastifyInstance, payrollId: 
 
   const earnedAmount = Number(earnedResult?.total ?? 0);
 
-  const [deductionResult] = await fastify.db
-    .select({
-      total: sql<string>`COALESCE(SUM(${schema.payrollDeductions.amount}), 0)`,
-    })
-    .from(schema.payrollDeductions)
-    .where(eq(schema.payrollDeductions.monthlyPayrollId, payrollId));
-
-  const deductionAmount = Number(deductionResult?.total ?? 0);
-
   const [paidResult] = await fastify.db
     .select({
       total: sql<string>`COALESCE(SUM(${schema.payrollTransactions.amount}), 0)`,
@@ -608,14 +554,13 @@ async function reconcileMonthlyPayrollById(fastify: FastifyInstance, payrollId: 
 
   const paidAmount = Number(paidResult?.total ?? 0);
 
-  const dueAmount = Math.max(0, earnedAmount - deductionAmount - paidAmount);
+  const dueAmount = Math.max(0, earnedAmount - paidAmount);
   const status = paidAmount > 0 && dueAmount <= 0 ? 'PAID' : payroll.status;
 
   const [updated] = await fastify.db
     .update(schema.monthlyPayrolls)
     .set({
       earnedAmount: earnedAmount.toFixed(2),
-      deductionAmount: deductionAmount.toFixed(2),
       paidAmount: paidAmount.toFixed(2),
       dueAmount: dueAmount.toFixed(2),
       status,
@@ -674,7 +619,7 @@ export async function getDailyEarningLedger(
   year: number
 ) {
   const { startDate, nextMonthStartDate } = getMonthDateRange(year, month);
-  const earningLedger = (schema as any).employeeEarningLedger;
+  const earningLedger = schema.employeeEarningLedger;
   return await fastify.db
     .select()
     .from(earningLedger)
@@ -723,130 +668,7 @@ export async function getDailyEarningTotals(
   return totals.sort((a, b) => b.earningDate.localeCompare(a.earningDate));
 }
 
-/**
- * 6. Create / delete monthly deductions.
- */
-export async function createPayrollDeduction(
-  fastify: FastifyInstance,
-  organizationId: string,
-  userId: string,
-  input: { monthlyPayrollId: string; amount: number; reason: string }
-) {
-  const [payroll] = await fastify.db
-    .select()
-    .from(schema.monthlyPayrolls)
-    .where(
-      and(
-        eq(schema.monthlyPayrolls.id, input.monthlyPayrollId),
-        eq(schema.monthlyPayrolls.organizationId, organizationId)
-      )
-    )
-    .limit(1);
 
-  if (!payroll) {
-    throw new AppError('Monthly payroll not found', 404, 'PAYROLL_NOT_FOUND');
-  }
-
-  const [deduction] = await fastify.db
-    .insert(schema.payrollDeductions)
-    .values({
-      monthlyPayrollId: input.monthlyPayrollId,
-      amount: input.amount.toFixed(2),
-      reason: input.reason,
-      createdBy: userId,
-    })
-    .returning();
-
-  await reconcileMonthlyPayrollById(fastify, input.monthlyPayrollId);
-  return deduction;
-}
-
-export async function deletePayrollDeduction(fastify: FastifyInstance, organizationId: string, deductionId: string) {
-  const [deduction] = await fastify.db
-    .select({
-      deduction: schema.payrollDeductions,
-      payroll: schema.monthlyPayrolls,
-    })
-    .from(schema.payrollDeductions)
-    .innerJoin(schema.monthlyPayrolls, eq(schema.monthlyPayrolls.id, schema.payrollDeductions.monthlyPayrollId))
-    .where(
-      and(
-        eq(schema.payrollDeductions.id, deductionId),
-        eq(schema.monthlyPayrolls.organizationId, organizationId)
-      )
-    )
-    .limit(1);
-
-  if (!deduction) {
-    throw new AppError('Payroll deduction not found', 404, 'DEDUCTION_NOT_FOUND');
-  }
-
-  await fastify.db.delete(schema.payrollDeductions).where(eq(schema.payrollDeductions.id, deductionId));
-  await reconcileMonthlyPayrollById(fastify, deduction.payroll.id);
-  return { status: 'DELETED' };
-}
-
-export async function updatePayrollDeduction(
-  fastify: FastifyInstance,
-  organizationId: string,
-  deductionId: string,
-  input: { amount?: number; reason?: string }
-) {
-  const [deduction] = await fastify.db
-    .select({
-      deduction: schema.payrollDeductions,
-      payroll: schema.monthlyPayrolls,
-    })
-    .from(schema.payrollDeductions)
-    .innerJoin(schema.monthlyPayrolls, eq(schema.monthlyPayrolls.id, schema.payrollDeductions.monthlyPayrollId))
-    .where(
-      and(
-        eq(schema.payrollDeductions.id, deductionId),
-        eq(schema.monthlyPayrolls.organizationId, organizationId)
-      )
-    )
-    .limit(1);
-
-  if (!deduction) {
-    throw new AppError('Payroll deduction not found', 404, 'DEDUCTION_NOT_FOUND');
-  }
-
-  const set: any = {};
-  if (input.amount !== undefined) {
-    set.amount = input.amount.toFixed(2);
-  }
-  if (input.reason !== undefined) {
-    set.reason = input.reason;
-  }
-
-  const [updated] = await fastify.db
-    .update(schema.payrollDeductions)
-    .set(set)
-    .where(eq(schema.payrollDeductions.id, deductionId))
-    .returning();
-
-  await reconcileMonthlyPayrollById(fastify, deduction.payroll.id);
-  return updated;
-}
-
-export async function listPayrollDeductions(fastify: FastifyInstance, monthlyPayrollId: string, organizationId?: string) {
-  if (organizationId) {
-    const [payroll] = await fastify.db
-      .select()
-      .from(schema.monthlyPayrolls)
-      .where(and(eq(schema.monthlyPayrolls.id, monthlyPayrollId), eq(schema.monthlyPayrolls.organizationId, organizationId)))
-      .limit(1);
-
-    if (!payroll) {
-      throw new AppError('Monthly payroll not found', 404, 'PAYROLL_NOT_FOUND');
-    }
-  }
-
-  return await fastify.db
-    .select()
-    .from(schema.payrollDeductions)
-    .where(eq(schema.payrollDeductions.monthlyPayrollId, monthlyPayrollId));
-}
 
 /**
  * 7. Record / delete salary payments.
@@ -1167,7 +989,6 @@ export function calculateSalary(params: SalaryCalculationInput) {
   } = params;
 
   const presentDays = Math.max(0, attendanceSummary.presentDays);
-  const lateDays = Math.max(0, attendanceSummary.lateDays);
   const halfDays = Math.max(0, attendanceSummary.halfDays);
   const absentDays = Math.max(0, attendanceSummary.absentDays);
   const paidLeaveDays = Math.max(0, attendanceSummary.paidLeaveDays ?? 0);
@@ -1176,17 +997,15 @@ export function calculateSalary(params: SalaryCalculationInput) {
   const workedDays = presentDays + halfDays * 0.5;
 
   const rulePresent = pickRule(shiftPaymentRules, 'attendanceStatus', 'PRESENT');
-  const ruleLate = pickRule(shiftPaymentRules, 'attendanceStatus', 'LATE');
   const ruleHalfDay = pickRule(shiftPaymentRules, 'attendanceStatus', 'HALF_DAY');
   const ruleAbsent = pickRule(shiftPaymentRules, 'attendanceStatus', 'ABSENT');
-  const hasShiftRules = Boolean(rulePresent || ruleLate || ruleHalfDay || ruleAbsent);
+  const hasShiftRules = Boolean(rulePresent || ruleHalfDay || ruleAbsent);
 
   const ruleHoliday = pickRule(unworkedPaymentRules, 'dayType', 'HOLIDAY');
   const ruleWeeklyOff = pickRule(unworkedPaymentRules, 'dayType', 'WEEKLY_OFF');
   const rulePaidLeave = pickRule(unworkedPaymentRules, 'dayType', 'PAID_LEAVE');
 
   const earnings: Array<{ code: string; label: string; amountCents: number }> = [];
-  const deductions: Array<{ code: string; label: string; amountCents: number }> = [];
 
   const dailyRate = Math.round(baseRateCents / Math.max(1, workingDaysInMonth));
 
@@ -1198,28 +1017,15 @@ export function calculateSalary(params: SalaryCalculationInput) {
     return rounded;
   };
 
-  const deduct = (code: string, label: string, amountCents: number) => {
-    const rounded = Math.max(0, Math.round(amountCents));
-    if (rounded > 0) {
-      deductions.push({ code, label, amountCents: rounded });
-    }
-    return rounded;
-  };
-
   let basePay = 0;
   let overtimePay = 0;
 
   if (hasShiftRules) {
-    const regularPresentDays = Math.max(0, presentDays - lateDays);
     basePay =
-      regularPresentDays * (rulePresent?.paymentCents ?? baseRateCents) +
-      lateDays * (ruleLate?.paymentCents ?? rulePresent?.paymentCents ?? baseRateCents) +
+      presentDays * (rulePresent?.paymentCents ?? baseRateCents) +
       halfDays * (ruleHalfDay?.paymentCents ?? Math.round(baseRateCents / 2));
 
     push('BASE_SALARY', 'Shift attendance payments', basePay);
-    if (ruleAbsent?.penaltyCents && absentDays > 0) {
-      deduct('ABSENT_PENALTY', 'Absent day penalty', ruleAbsent.penaltyCents * absentDays);
-    }
   } else if (compensationType === 'MONTHLY') {
     const pricedPaidLeaveDays = rulePaidLeave ? 0 : paidLeaveDays;
     const pricedPaidHolidays = ruleHoliday ? 0 : paidHolidayDays;
@@ -1282,8 +1088,7 @@ export function calculateSalary(params: SalaryCalculationInput) {
   }
 
   const grossSalaryCents = earnings.reduce((sum, item) => sum + item.amountCents, 0);
-  const deductionsCents = deductions.reduce((sum, item) => sum + item.amountCents, 0);
-  const netSalaryCents = Math.max(0, grossSalaryCents - deductionsCents);
+  const netSalaryCents = grossSalaryCents;
 
   return {
     grossSalaryCents,
@@ -1292,9 +1097,9 @@ export function calculateSalary(params: SalaryCalculationInput) {
       paidLeavePay +
       unworkedWeeklyOffPay +
       overtimePay,
-    deductionsCents,
+    deductionsCents: 0,
     netSalaryCents,
-    breakdown: { earnings, deductions },
+    breakdown: { earnings, deductions: [] },
   };
 }
 
@@ -1304,7 +1109,7 @@ export function calculateDailyAccrual(params: {
   overtimeRateCents: number;
   shiftPaymentRules?: PaymentRuleLike[];
   unworkedPaymentRules?: PaymentRuleLike[];
-  status: 'PRESENT' | 'LATE' | 'HALF_DAY' | 'ABSENT';
+  status: 'PRESENT' | 'HALF_DAY' | 'ABSENT';
   workedMinutes: number;
   overtimeMinutes: number;
   periodStartDate: string;
@@ -1356,7 +1161,7 @@ export interface ShiftPayRule {
   organizationId: string;
   employeeId: string | null;
   premisesId: string | null;
-  attendanceStatus: 'PRESENT' | 'LATE' | 'HALF_DAY' | 'ABSENT';
+  attendanceStatus: 'PRESENT' | 'HALF_DAY' | 'ABSENT';
   paymentCents: number;
   penaltyCents: number;
   multiplierBasisPoints: number;
@@ -1415,7 +1220,6 @@ export async function getShiftPaymentRules(
 
   return assignments.flatMap((assignment) => [
     assignmentRule(assignment, 'PRESENT', toCents(assignment.presentPay)),
-    assignmentRule(assignment, 'LATE', toCents(assignment.presentPay)),
     assignmentRule(assignment, 'HALF_DAY', toCents(assignment.halfDayPay)),
     assignmentRule(assignment, 'ABSENT', toCents(assignment.absentPay)),
   ]);
@@ -1449,7 +1253,7 @@ export async function createShiftPaymentRule(
   input: {
     employeeId?: string | null;
     premisesId?: string | null;
-    attendanceStatus: 'PRESENT' | 'LATE' | 'HALF_DAY' | 'ABSENT';
+    attendanceStatus: 'PRESENT' | 'HALF_DAY' | 'ABSENT';
     paymentCents: number;
     penaltyCents?: number;
     multiplierBasisPoints?: number;
@@ -1561,4 +1365,361 @@ export async function createUnworkedPaymentRule(
 
   return created;
 }
+
+export async function getMyMonthlyEarningLedger(
+  fastify: FastifyInstance,
+  user: { userId: string; organizationId: string; role: string },
+  month: number,
+  year: number
+) {
+  const profile = await findStaffProfile(fastify, user.userId, user.organizationId);
+  if (!profile || !profile.premisesId) {
+    throw new AppError('Employee profile or assigned premises not found', 404, 'EMPLOYEE_NOT_FOUND');
+  }
+
+  const report = await getOrGenerateMonthlyPayroll(
+    fastify,
+    user.organizationId,
+    profile.premisesId,
+    profile.id,
+    month,
+    year
+  );
+
+  const r: any = report as any;
+
+  const dailyTotals = await getDailyEarningTotals(
+    fastify,
+    user.organizationId,
+    profile.id,
+    month,
+    year
+  );
+
+  const rawEntries = await getDailyEarningLedger(
+    fastify,
+    user.organizationId,
+    profile.id,
+    month,
+    year
+  );
+
+  const payments = await fastify.db
+    .select({
+      id: schema.payrollTransactions.id,
+      amount: schema.payrollTransactions.amount,
+      paymentDate: schema.payrollTransactions.paymentDate,
+      paymentMethod: schema.payrollTransactions.paymentMethod,
+      reference: schema.payrollTransactions.reference,
+    })
+    .from(schema.payrollTransactions)
+    .innerJoin(
+      schema.monthlyPayrolls,
+      eq(schema.monthlyPayrolls.id, schema.payrollTransactions.monthlyPayrollId)
+    )
+    .where(
+      and(
+        eq(schema.monthlyPayrolls.organizationId, user.organizationId),
+        eq(schema.monthlyPayrolls.employeeId, profile.id),
+        eq(schema.monthlyPayrolls.month, month),
+        eq(schema.monthlyPayrolls.year, year)
+      )
+    )
+    .orderBy(desc(schema.payrollTransactions.paymentDate));
+
+  return {
+    staffProfileId: profile.id,
+    staffName: profile.name,
+    staffCode: profile.employeeCode,
+    premisesId: profile.premisesId,
+    month,
+    year,
+    earnedAmount: r.earnedAmount ?? '0.00',
+    earnedPaise: Math.round(Number(r.earnedAmount ?? 0) * 100),
+    paidAmount: r.paidAmount ?? '0.00',
+    dueAmount: r.dueAmount ?? '0.00',
+    status: r.status ?? 'OPEN',
+    attendanceSummary: r.attendanceSummary ?? {
+      totalDays: 0,
+      presentDays: 0,
+      lateDays: 0,
+      halfDays: 0,
+      absentDays: 0,
+      leaveDays: 0,
+      unpaidLeaveDays: 0,
+      paidLeaveDays: 0,
+      holidayDays: 0,
+      weeklyOffDays: 0,
+      totalWorkedMinutes: 0,
+      totalOvertimeMinutes: 0,
+    },
+    breakdown: r.breakdown ?? { earnings: [] },
+    dailyTotals,
+    entries: rawEntries.map((e: any) => {
+      const paise = Math.round(Number(e.amount) || 0);
+      return {
+        id: e.id,
+        organizationId: e.organizationId,
+        staffProfileId: e.employeeId,
+        type: e.type,
+        amount: (paise / 100).toFixed(2),
+        amountPaise: paise,
+        earningDate: e.earningDate,
+        createdAt: e.createdAt,
+      };
+    }),
+    payments: payments.map((p: any) => ({
+      id: p.id,
+      amountPaise: Math.round(Number(p.amount) * 100),
+      paymentDate: p.paymentDate,
+      paymentMethod: p.paymentMethod,
+      referenceNumber: p.reference,
+    })),
+  };
+}
+
+export async function listMyPayslips(
+  fastify: FastifyInstance,
+  user: { userId: string; organizationId: string },
+  query: { month?: number; year?: number }
+) {
+  const profile = await findStaffProfile(fastify, user.userId, user.organizationId);
+  if (!profile || !profile.premisesId) return [];
+  const { month: reqMonth, year: reqYear } = query;
+  const now = new Date();
+
+  const targetPairs: Array<{ month: number; year: number }> = [];
+  if (reqMonth && reqYear) {
+    targetPairs.push({ month: reqMonth, year: reqYear });
+  } else if (reqYear) {
+    const maxM = reqYear === now.getFullYear() ? now.getMonth() + 1 : 12;
+    for (let m = maxM; m >= 1; m--) {
+      targetPairs.push({ month: m, year: reqYear });
+    }
+  } else {
+    let startYear = now.getFullYear();
+    let startMonth = 1;
+    if (profile.hireDate) {
+      const [hY, hM] = profile.hireDate.split('-').map(Number);
+      if (hY && hM) {
+        startYear = hY;
+        startMonth = hM;
+      }
+    }
+    const currentTotalMonths = now.getFullYear() * 12 + (now.getMonth() + 1);
+    const startTotalMonths = Math.max(startYear * 12 + startMonth, currentTotalMonths - 23);
+    for (let tm = currentTotalMonths; tm >= startTotalMonths; tm--) {
+      const y = Math.floor((tm - 1) / 12);
+      const m = ((tm - 1) % 12) + 1;
+      targetPairs.push({ month: m, year: y });
+    }
+  }
+
+  const results = [];
+  for (const { month, year } of targetPairs) {
+    try {
+      const report = await getOrGenerateMonthlyPayroll(
+        fastify,
+        user.organizationId,
+        profile.premisesId,
+        profile.id,
+        month,
+        year
+      );
+      if (report) {
+        const r: any = report as any;
+        const periodStartDate = `${year}-${String(month).padStart(2, '0')}-01`;
+        const periodEndDate = `${year}-${String(month).padStart(2, '0')}-${new Date(year, month, 0).getDate()}`;
+        results.push({
+          id: r.id,
+          payrollPeriodId: r.id,
+          periodStartDate,
+          periodEndDate,
+          periodStatus: r.status,
+          grossSalaryPaise: Math.round(Number(r.earnedAmount) * 100),
+          additionsPaise: 0,
+          deductionsPaise: 0,
+          netSalaryPaise: Math.round(Number(r.dueAmount) * 100),
+          breakdown: r.breakdown ?? { earnings: [] },
+          attendanceSummary: r.attendanceSummary ?? {
+            totalDays: 0,
+            presentDays: 0,
+            lateDays: 0,
+            halfDays: 0,
+            absentDays: 0,
+            leaveDays: 0,
+            unpaidLeaveDays: 0,
+            paidLeaveDays: 0,
+            holidayDays: 0,
+            weeklyOffDays: 0,
+            totalWorkedMinutes: 0,
+            totalOvertimeMinutes: 0,
+          },
+          createdAt: r.createdAt,
+        });
+      }
+    } catch (err) {
+      fastify.log.warn({ err, month, year }, 'Failed to compute monthly payroll for payslip');
+    }
+  }
+  return results;
+}
+
+export async function downloadPayslipPdf(
+  fastify: FastifyInstance,
+  user: { userId: string; organizationId: string; role: string },
+  query: { month: number; year: number; staffProfileId?: string }
+) {
+  let staffId = query.staffProfileId;
+  if (user.role === 'STAFF' || (user.role === 'MANAGER' && !staffId)) {
+    const selfProfile = await findStaffProfile(fastify, user.userId, user.organizationId);
+    if (!selfProfile) throw new AppError('Employee profile not found', 404, 'EMPLOYEE_NOT_FOUND');
+    staffId = selfProfile.id;
+  }
+  if (!staffId) {
+    throw new AppError('staffProfileId is required', 400, 'STAFF_PROFILE_ID_REQUIRED');
+  }
+
+  const [employee] = await fastify.db
+    .select({
+      id: schema.employees.id,
+      name: schema.employees.name,
+      employeeCode: schema.employees.employeeCode,
+      premisesId: schema.employees.premisesId,
+      department: schema.employees.department,
+      designation: schema.employees.designation,
+      email: schema.users.email,
+    })
+    .from(schema.employees)
+    .innerJoin(schema.users, eq(schema.employees.userId, schema.users.id))
+    .where(
+      and(
+        eq(schema.employees.id, staffId),
+        eq(schema.employees.organizationId, user.organizationId)
+      )
+    )
+    .limit(1);
+
+  if (!employee || !employee.premisesId) {
+    throw new AppError('Employee or assigned premises not found', 404, 'EMPLOYEE_NOT_FOUND');
+  }
+
+  const [org] = await fastify.db
+    .select({ name: schema.organizations.name, currency: schema.organizations.currency })
+    .from(schema.organizations)
+    .where(eq(schema.organizations.id, user.organizationId))
+    .limit(1);
+
+  const orgName = org?.name || 'Presence Organization';
+  const currency = org?.currency || 'INR';
+
+  const report = await getOrGenerateMonthlyPayroll(
+    fastify,
+    user.organizationId,
+    employee.premisesId,
+    employee.id,
+    query.month,
+    query.year
+  );
+  if (!report) throw new AppError('Payroll report could not be generated', 500, 'PAYROLL_GENERATION_FAILED');
+
+  const r: any = report as any;
+  const att = r.attendanceSummary ?? {};
+  const monthNames = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+  const monthLabel = monthNames[query.month - 1] || `Month ${query.month}`;
+
+  const pdfTable: PdfTable = {
+    title: `PAYSLIP - ${monthLabel.toUpperCase()} ${query.year}`,
+    subtitle: `${orgName} | Employee: ${employee.name} (${employee.employeeCode}) | Status: ${r.status}`,
+    columns: ['Category', 'Details', 'Amount / Count'],
+    rows: [
+      ['Employee', 'Name', employee.name],
+      ['Employee', 'Code', employee.employeeCode],
+      ['Employee', 'Email', employee.email],
+      ['Period', 'Month / Year', `${monthLabel} ${query.year}`],
+      ['Attendance', 'Present Days', att.presentDays ?? 0],
+      ['Attendance', 'Half Days', att.halfDays ?? 0],
+      ['Attendance', 'Absent Days', att.absentDays ?? 0],
+      ['Attendance', 'Leave Days', att.leaveDays ?? 0],
+      ['Attendance', 'Holiday Days', att.holidayDays ?? 0],
+      ['Attendance', 'Weekly Off Days', att.weeklyOffDays ?? 0],
+      ['Attendance', 'Overtime Minutes', att.totalOvertimeMinutes ?? 0],
+      ['Earnings', 'Gross Earned', `${currency} ${r.earnedAmount}`],
+      ['Summary', 'Net Due / Payable', `${currency} ${r.dueAmount}`],
+      ['Summary', 'Amount Paid', `${currency} ${r.paidAmount}`],
+      ['Status', 'Payroll Status', r.status],
+    ],
+  };
+
+  const pdfBuffer = buildPdfReport(pdfTable);
+  return {
+    filename: `payslip-${employee.employeeCode}-${query.year}-${String(query.month).padStart(2, '0')}.pdf`,
+    pdfBuffer,
+  };
+}
+
+export async function getMyOverallPayrollSummary(
+  fastify: FastifyInstance,
+  user: { userId: string; organizationId: string; role: string }
+) {
+  const profile = await findStaffProfile(fastify, user.userId, user.organizationId);
+  if (!profile) {
+    throw new AppError('Employee profile not found', 404, 'EMPLOYEE_NOT_FOUND');
+  }
+
+  const earningLedger = schema.employeeEarningLedger;
+
+  const [earnedResult] = await fastify.db
+    .select({
+      total: sql<string>`COALESCE(SUM(${earningLedger.amount}), 0)`,
+    })
+    .from(earningLedger)
+    .where(
+      and(
+        eq(earningLedger.organizationId, user.organizationId),
+        eq(earningLedger.employeeId, profile.id)
+      )
+    );
+  const totalEarnedAmount = Number(earnedResult?.total ?? 0);
+
+  const [payrollAgg] = await fastify.db
+    .select({
+      totalPaid: sql<string>`COALESCE(SUM(${schema.monthlyPayrolls.paidAmount}), 0)`,
+    })
+    .from(schema.monthlyPayrolls)
+    .where(
+      and(
+        eq(schema.monthlyPayrolls.organizationId, user.organizationId),
+        eq(schema.monthlyPayrolls.employeeId, profile.id)
+      )
+    );
+
+  const totalPaidAmount = Number(payrollAgg?.totalPaid ?? 0);
+  const totalDueAmount = Math.max(0, totalEarnedAmount - totalPaidAmount);
+
+  const totalEarnedPaise = Math.round(totalEarnedAmount * 100);
+  const totalPaidPaise = Math.round(totalPaidAmount * 100);
+  const totalDuePaise = Math.round(totalDueAmount * 100);
+
+  return {
+    staffProfileId: profile.id,
+    staffName: profile.name,
+    staffCode: profile.employeeCode,
+    premisesId: profile.premisesId,
+    totalEarnedAmount: totalEarnedAmount.toFixed(2),
+    totalEarnedPaise,
+    totalPaidAmount: totalPaidAmount.toFixed(2),
+    totalPaidPaise,
+    totalDeductionAmount: "0.00",
+    totalDeductionPaise: 0,
+    totalDueAmount: totalDueAmount.toFixed(2),
+    totalDuePaise,
+    totalBalancePaise: totalDuePaise,
+  };
+}
+
+
 

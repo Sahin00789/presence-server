@@ -40,6 +40,23 @@ export async function getPremises(
   );
 }
 
+export async function getSinglePremises(
+  fastify: FastifyInstance,
+  organizationId: string
+): Promise<Premises> {
+  const list = await getPremises(fastify, organizationId);
+  if (list.length > 0) {
+    return list[0];
+  }
+  return createPremises(fastify, organizationId, {
+    name: 'Main Premises',
+    address: 'Main Office',
+    latitude: '0.0000000',
+    longitude: '0.0000000',
+    radiusMeters: 50,
+  });
+}
+
 export async function createPremises(
   fastify: FastifyInstance,
   organizationId: string,

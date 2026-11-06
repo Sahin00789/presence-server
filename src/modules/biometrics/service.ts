@@ -3,7 +3,6 @@ import { and, eq } from 'drizzle-orm';
 import { multiPoseFaceTemplates } from '../../db/schema.js';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
-import { writeAuditLog } from '../../shared/services/audit.service.js';
 import {
   FACE_EMBEDDING_SIMILARITY_THRESHOLD,
 } from '../../shared/utils/face.js';
@@ -127,23 +126,6 @@ export async function saveMultiPoseEnrollment(
         revokedAt: null,
       },
     });
-
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'FACE_MULTI_POSE_ENROLLED',
-    resourceType: 'staff_profile',
-    resourceId: profile.id,
-    metadata: {
-      modelVersion: input.modelVersion,
-      poseCount: 5,
-      dimensions: poses.center.length,
-      qualityScore,
-      passiveLivenessScore: input.liveness.passiveTextureScore,
-      blinkCount: input.liveness.blinkCount,
-      premisesId: input.premisesId ?? null,
-    },
-  });
 
   return {
     success: true,
@@ -282,21 +264,6 @@ export async function matchLiveFaceVector(
       message: 'No employee matched above the similarity threshold.',
     };
   }
-
-  await writeAuditLog(fastify, {
-    organizationId,
-    action: 'FACE_MULTI_POSE_CLOCK_IN',
-    resourceType: 'employee',
-    resourceId: best.employee_id,
-    metadata: {
-      matchedPose: best.pose,
-      similarity: Number(similarity.toFixed(4)),
-      threshold,
-      blinkCount: input.liveness.blinkCount,
-      passiveTextureScore: input.liveness.passiveTextureScore,
-      premisesId: input.premisesId ?? null,
-    },
-  });
 
   return {
     success: true,

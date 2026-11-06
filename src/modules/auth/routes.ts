@@ -81,7 +81,32 @@ export async function authRoutes(fastify: FastifyInstance) {
     }
   );
 
-  // Google OAuth Exchange Route
+  // Google OAuth Authentication Route
+  server.post(
+    '/api/v1/auth/google',
+    {
+      preHandler: [authRateLimit('auth:google', 10)],
+      schema: {
+        description:
+          'Signs in with Google ID token (idToken). Returns app JWTs',
+        tags: ['Auth'],
+        body: googleExchangeSchema,
+        response: {
+          200: authResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const deviceContext: DeviceContext = {
+        ipAddress: request.ip,
+        userAgent: request.headers['user-agent'],
+      };
+      const result = await processGoogleExchange(fastify, request.body, deviceContext);
+      return reply.send(result);
+    }
+  );
+
+  // Google OAuth Exchange Route (legacy alias)
   server.post(
     '/api/v1/auth/google/exchange',
     {

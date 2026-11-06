@@ -31,9 +31,6 @@ export async function findStaffProfile(
 
 /**
  * Same as {@link findStaffProfile} but creates an employee record on demand.
- *
- * Managers are also employees, so an employment record can legitimately be
- * created the first time somebody clocks in.
  */
 export async function ensureStaffProfile(
   fastify: FastifyInstance,
@@ -74,7 +71,7 @@ export async function ensureStaffProfile(
     .values({
       organizationId,
       userId,
-      role: 'STAFF',
+      role: 'EMPLOYEE',
       name: user.fullName,
       employeeCode: await generateStaffCode(fastify, organizationId),
       hireDate: new Date().toISOString().slice(0, 10),
@@ -86,8 +83,6 @@ export async function ensureStaffProfile(
 
 /**
  * Resolves an employee by either employeeId or userId.
- * Auto-provisions an employee record if the user exists in the organization but
- * does not have an employee record yet (e.g. Managers).
  */
 export async function resolveStaffProfile(
   fastify: FastifyInstance,
@@ -161,18 +156,18 @@ export async function generateStaffCode(
 
 /**
  * Resolves every user id that should receive operational notifications for a
- * given organization (owner + managers + the employee themselves).
+ * given organization (owner + the employee themselves).
  */
 export async function resolveNotificationTargets(
   fastify: FastifyInstance,
   organizationId: string,
   employeeId?: string,
-  includeManagers = true,
+  includeOwners = true,
   premisesId?: string | null
 ): Promise<string[]> {
   const targets = new Set<string>();
 
-  if (includeManagers) {
+  if (includeOwners) {
     const [organization] = await fastify.db
       .select({ ownerUserId: schema.organizations.ownerUserId })
       .from(schema.organizations)
@@ -181,45 +176,6 @@ export async function resolveNotificationTargets(
 
     if (organization?.ownerUserId) {
       targets.add(organization.ownerUserId);
-    }
-
-    if (premisesId) {
-      const managers = await fastify.db
-        .select({ userId: schema.employees.userId })
-        .from(schema.employees)
-        .where(
-          and(
-            eq(schema.employees.organizationId, organizationId),
-            eq(schema.employees.role, 'MANAGER'),
-            eq(schema.employees.isActive, true),
-            eq(schema.employees.premisesId, premisesId),
-            isNotNull(schema.employees.userId)
-          )
-        );
-
-      for (const manager of managers) {
-        if (manager.userId) {
-          targets.add(manager.userId);
-        }
-      }
-    } else {
-      const managers = await fastify.db
-        .select({ userId: schema.employees.userId })
-        .from(schema.employees)
-        .where(
-          and(
-            eq(schema.employees.organizationId, organizationId),
-            eq(schema.employees.role, 'MANAGER'),
-            eq(schema.employees.isActive, true),
-            isNotNull(schema.employees.userId)
-          )
-        );
-
-      for (const manager of managers) {
-        if (manager.userId) {
-          targets.add(manager.userId);
-        }
-      }
     }
   }
 
@@ -263,6 +219,7 @@ export async function listOrganizationStaff(
       name: schema.employees.name,
       department: schema.employees.department,
       designation: schema.employees.designation,
+      address: schema.employees.address,
       hireDate: schema.employees.hireDate,
       terminationDate: schema.employees.terminationDate,
       isActive: schema.employees.isActive,
@@ -293,25 +250,13 @@ export async function listOwnerUserIds(
 }
 
 /**
- * Returns the user ids of every active manager of an organization.
+ * Returns the user ids of every active manager of an organization (legacy alias, returns empty array).
  */
 export async function listManagerUserIds(
   fastify: FastifyInstance,
   organizationId: string
 ): Promise<string[]> {
-  const rows = await fastify.db
-    .select({ userId: schema.employees.userId })
-    .from(schema.employees)
-    .where(
-      and(
-        eq(schema.employees.organizationId, organizationId),
-        eq(schema.employees.role, 'MANAGER'),
-        eq(schema.employees.isActive, true),
-        isNotNull(schema.employees.userId)
-      )
-    );
-
-  return rows.map((row) => row.userId).filter((id): id is string => Boolean(id));
+  return [];
 }
 
 /**

@@ -3,7 +3,6 @@ import { and, desc, eq, gte, inArray, lte } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
-import { writeAuditLog } from '../../shared/services/audit.service.js';
 import { createNotification } from '../../shared/services/notification.service.js';
 import {
   findStaffProfile,
@@ -11,12 +10,16 @@ import {
   listOwnerUserIds,
 } from '../../shared/services/staff.service.js';
 import {
+  addDays,
   dayOfWeek,
+  enumerateDates,
   isOvernightShift,
   parseTimeToMinutes,
+  toDateISO,
 } from '../../shared/utils/datetime.js';
+import { getAssignedDayNumbers } from '../shifts/service.js';
 
-type Role = 'OWNER' | 'MANAGER' | 'STAFF';
+type Role = 'OWNER' | 'EMPLOYEE';
 
 const reviewingUsers = alias(schema.users, 'reviewing_users');
 
@@ -66,30 +69,23 @@ export function mapLeave(row: {
   };
 }
 
-export async function createLeaveRequest(
+export async function listUpcomingShiftsForLeave(
   fastify: FastifyInstance,
   user: { userId: string; role: Role },
   organizationId: string,
-  input: {
-    shiftAssignmentId: string;
-    workDate: string;
-    reason: string;
-  }
+  days: number = 14
 ) {
-  // 1. Derive staff identity from authenticated session.
   const profile = await findStaffProfile(fastify, user.userId, organizationId);
   if (!profile) {
-    throw new AppError('Staff profile not found', 404, 'STAFF_PROFILE_NOT_FOUND');
+    return [];
   }
 
-  // 2. Validate selected shift assignment belongs to employee and organization.
-  const [assignment] = await fastify.db
+  const assignments = await fastify.db
     .select({
       id: schema.employeeShiftAssignments.id,
-      organizationId: schema.employeeShiftAssignments.organizationId,
-      premisesId: schema.employeeShiftAssignments.premisesId,
-      staffProfileId: schema.employeeShiftAssignments.employeeId,
+      shiftId: schema.employeeShiftAssignments.shiftId,
       shiftName: schema.shifts.shiftName,
+      dayName: schema.shifts.dayName,
       startTime: schema.shifts.startTime,
       endTime: schema.shifts.endTime,
       premisesName: schema.premises.name,
@@ -99,131 +95,239 @@ export async function createLeaveRequest(
     .innerJoin(schema.premises, eq(schema.employeeShiftAssignments.premisesId, schema.premises.id))
     .where(
       and(
-        eq(schema.employeeShiftAssignments.id, input.shiftAssignmentId),
         eq(schema.employeeShiftAssignments.employeeId, profile.id),
         eq(schema.employeeShiftAssignments.organizationId, organizationId),
         eq(schema.employeeShiftAssignments.isActive, true)
       )
-    )
-    .limit(1);
-
-  if (!assignment) {
-    throw new AppError(
-      'Selected shift assignment does not belong to employee or is inactive',
-      404,
-      'SHIFT_ASSIGNMENT_NOT_FOUND'
     );
+
+  if (assignments.length === 0) {
+    return [];
   }
 
-  // 3. Prevent duplicate active leave request for the same shift assignment & work date.
-  const [overlapping] = await fastify.db
-    .select({ id: schema.leaveRequests.id })
+  const today = toDateISO(new Date());
+  const endDate = addDays(today, days - 1);
+  const dates = enumerateDates(today, endDate);
+
+  const existingLeaves = await fastify.db
+    .select({
+      shiftAssignmentId: schema.leaveRequests.shiftAssignmentId,
+      workDate: schema.leaveRequests.workDate,
+    })
     .from(schema.leaveRequests)
     .where(
       and(
-        eq(schema.leaveRequests.shiftAssignmentId, input.shiftAssignmentId),
-        eq(schema.leaveRequests.workDate, input.workDate),
-        inArray(schema.leaveRequests.status, ['PENDING', 'APPROVED'])
+        eq(schema.leaveRequests.employeeId, profile.id),
+        eq(schema.leaveRequests.organizationId, organizationId),
+        inArray(schema.leaveRequests.status, ['PENDING', 'APPROVED']),
+        gte(schema.leaveRequests.workDate, today),
+        lte(schema.leaveRequests.workDate, endDate)
       )
-    )
-    .limit(1);
-
-  if (overlapping) {
-    throw new AppError(
-      'A pending or approved leave request already exists for this shift assignment and work date',
-      409,
-      'LEAVE_OVERLAP'
     );
-  }
 
-  // 4. Check if employee has already clocked in or completed conflicting attendance.
-  const [existingAttendance] = await fastify.db
-    .select({
-      id: schema.employeeAttendance.id,
-      clockInAt: schema.employeeAttendance.clockInAt,
-      status: schema.employeeAttendance.status,
-    })
-    .from(schema.employeeAttendance)
-    .where(
-      and(
-        eq(schema.employeeAttendance.shiftAssignmentId, input.shiftAssignmentId),
-        eq(schema.employeeAttendance.workDate, input.workDate)
-      )
-    )
-    .limit(1);
-
-  if (
-    existingAttendance &&
-    (existingAttendance.clockInAt !== null ||
-      ['PRESENT', 'LATE', 'HALF_DAY'].includes(existingAttendance.status))
-  ) {
-    throw new AppError(
-      'Cannot request leave: Attendance or clock-in has already been recorded for this date',
-      409,
-      'ATTENDANCE_CONFLICT'
-    );
-  }
-
-  // 5. Insert leave request record.
-  const [created] = await fastify.db
-    .insert(schema.leaveRequests)
-    .values({
-      organizationId: organizationId,
-      premisesId: assignment.premisesId,
-      employeeId: profile.id,
-      shiftAssignmentId: input.shiftAssignmentId,
-      workDate: input.workDate,
-      reason: input.reason,
-      requestedBy: user.userId,
-      status: 'PENDING',
-    })
-    .returning();
-
-  // 6. Send notifications to reviewers.
-  const reviewerIds = Array.from(
-    new Set([
-      ...(await listManagerUserIds(fastify, organizationId)),
-      ...(await listOwnerUserIds(fastify, organizationId)),
-    ])
+  const leaveSet = new Set(
+    existingLeaves.map((l) => `${l.shiftAssignmentId}_${String(l.workDate)}`)
   );
 
-  const [staffUser] = await fastify.db
-    .select({ fullName: schema.users.fullName, staffCode: schema.employees.employeeCode })
-    .from(schema.employees)
-    .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
-    .where(eq(schema.employees.id, profile.id))
-    .limit(1);
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const upcomingShifts = [];
 
-  for (const reviewerId of reviewerIds) {
-    await createNotification(fastify, {
-      organizationId,
-      userId: reviewerId,
-      type: 'LEAVE_REQUESTED',
-      title: 'Leave request awaiting review',
-      body: `${staffUser?.fullName ?? 'Staff'} requested leave for ${assignment.shiftName} on ${input.workDate}.`,
-      dedupeKey: `leave-requested:${created.id}:${reviewerId}`,
-      metadata: { leaveRequestId: created.id, staffProfileId: profile.id, workDate: input.workDate },
-    });
+  for (const dateStr of dates) {
+    const dow = dayOfWeek(dateStr);
+    const dayNameStr = dayNames[dow];
+
+    for (const assignment of assignments) {
+      const assignedDays = getAssignedDayNumbers(assignment.dayName);
+      if (assignedDays.includes(dow)) {
+        const key = `${assignment.id}_${dateStr}`;
+        upcomingShifts.push({
+          shiftAssignmentId: assignment.id,
+          shiftId: assignment.shiftId,
+          shiftName: assignment.shiftName,
+          workDate: dateStr,
+          dayOfWeek: dayNameStr,
+          startTime: assignment.startTime,
+          endTime: assignment.endTime,
+          premisesName: assignment.premisesName,
+          alreadyRequested: leaveSet.has(key),
+        });
+      }
+    }
   }
 
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: user.userId,
-    action: 'LEAVE_REQUESTED',
-    resourceType: 'leave_request',
-    resourceId: created.id,
-    metadata: { staffProfileId: profile.id, shiftAssignmentId: input.shiftAssignmentId, workDate: input.workDate },
-  });
+  return upcomingShifts;
+}
 
-  return mapLeave({
-    leave: created,
-    staffName: staffUser?.fullName ?? '',
-    staffCode: staffUser?.staffCode ?? '',
-    premisesName: assignment.premisesName,
-    shiftName: assignment.shiftName,
-    startTime: assignment.startTime,
-    endTime: assignment.endTime,
-  });
+export async function createLeaveRequest(
+  fastify: FastifyInstance,
+  user: { userId: string; role: Role },
+  organizationId: string,
+  input: {
+    shiftAssignmentId?: string;
+    workDate?: string;
+    assignedShiftIdWithDate?: Array<{ shiftAssignmentId: string; workDate: string }>;
+    assignedshiftidwithdate?: Array<{ shiftAssignmentId: string; workDate: string }>;
+    reason: string;
+  }
+) {
+  // 1. Derive staff identity from authenticated session.
+  const profile = await findStaffProfile(fastify, user.userId, organizationId);
+  if (!profile) {
+    throw new AppError('Staff profile not found', 404, 'STAFF_PROFILE_NOT_FOUND');
+  }
+
+  const rawItems = input.assignedShiftIdWithDate ?? input.assignedshiftidwithdate ?? [];
+  const items: Array<{ shiftAssignmentId: string; workDate: string }> = [...rawItems];
+
+  if (items.length === 0 && input.shiftAssignmentId && input.workDate) {
+    items.push({ shiftAssignmentId: input.shiftAssignmentId, workDate: input.workDate });
+  }
+
+  if (items.length === 0) {
+    throw new AppError('At least one shift must be selected for leave request', 400, 'NO_SHIFTS_SELECTED');
+  }
+
+  const createdLeaves = [];
+
+  for (const item of items) {
+    // 2. Validate selected shift assignment belongs to employee and organization.
+    const [assignment] = await fastify.db
+      .select({
+        id: schema.employeeShiftAssignments.id,
+        organizationId: schema.employeeShiftAssignments.organizationId,
+        premisesId: schema.employeeShiftAssignments.premisesId,
+        staffProfileId: schema.employeeShiftAssignments.employeeId,
+        shiftName: schema.shifts.shiftName,
+        startTime: schema.shifts.startTime,
+        endTime: schema.shifts.endTime,
+        premisesName: schema.premises.name,
+      })
+      .from(schema.employeeShiftAssignments)
+      .innerJoin(schema.shifts, eq(schema.employeeShiftAssignments.shiftId, schema.shifts.id))
+      .innerJoin(schema.premises, eq(schema.employeeShiftAssignments.premisesId, schema.premises.id))
+      .where(
+        and(
+          eq(schema.employeeShiftAssignments.id, item.shiftAssignmentId),
+          eq(schema.employeeShiftAssignments.employeeId, profile.id),
+          eq(schema.employeeShiftAssignments.organizationId, organizationId),
+          eq(schema.employeeShiftAssignments.isActive, true)
+        )
+      )
+      .limit(1);
+
+    if (!assignment) {
+      throw new AppError(
+        `Selected shift assignment (${item.shiftAssignmentId}) does not belong to employee or is inactive`,
+        404,
+        'SHIFT_ASSIGNMENT_NOT_FOUND'
+      );
+    }
+
+    // 3. Prevent duplicate active leave request for the same shift assignment & work date.
+    const [overlapping] = await fastify.db
+      .select({ id: schema.leaveRequests.id })
+      .from(schema.leaveRequests)
+      .where(
+        and(
+          eq(schema.leaveRequests.shiftAssignmentId, item.shiftAssignmentId),
+          eq(schema.leaveRequests.workDate, item.workDate),
+          inArray(schema.leaveRequests.status, ['PENDING', 'APPROVED'])
+        )
+      )
+      .limit(1);
+
+    if (overlapping) {
+      throw new AppError(
+        `A pending or approved leave request already exists for this shift on ${item.workDate}`,
+        409,
+        'LEAVE_OVERLAP'
+      );
+    }
+
+    // 4. Check if employee has already clocked in or completed conflicting attendance.
+    const [existingAttendance] = await fastify.db
+      .select({
+        id: schema.employeeAttendance.id,
+        clockInAt: schema.employeeAttendance.clockInAt,
+        status: schema.employeeAttendance.status,
+      })
+      .from(schema.employeeAttendance)
+      .where(
+        and(
+          eq(schema.employeeAttendance.shiftAssignmentId, item.shiftAssignmentId),
+          eq(schema.employeeAttendance.workDate, item.workDate)
+        )
+      )
+      .limit(1);
+
+    if (
+      existingAttendance &&
+      (existingAttendance.clockInAt !== null ||
+        ['PRESENT', 'HALF_DAY'].includes(existingAttendance.status))
+    ) {
+      throw new AppError(
+        `Cannot request leave: Attendance or clock-in has already been recorded for ${item.workDate}`,
+        409,
+        'ATTENDANCE_CONFLICT'
+      );
+    }
+
+    // 5. Insert leave request record.
+    const [created] = await fastify.db
+      .insert(schema.leaveRequests)
+      .values({
+        organizationId: organizationId,
+        premisesId: assignment.premisesId,
+        employeeId: profile.id,
+        shiftAssignmentId: item.shiftAssignmentId,
+        workDate: item.workDate,
+        reason: input.reason,
+        requestedBy: user.userId,
+        status: 'PENDING',
+      })
+      .returning();
+
+    // 6. Send notifications to reviewers.
+    const reviewerIds = Array.from(
+      new Set([
+        ...(await listManagerUserIds(fastify, organizationId)),
+        ...(await listOwnerUserIds(fastify, organizationId)),
+      ])
+    );
+
+    const [staffUser] = await fastify.db
+      .select({ fullName: schema.users.fullName, staffCode: schema.employees.employeeCode })
+      .from(schema.employees)
+      .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
+      .where(eq(schema.employees.id, profile.id))
+      .limit(1);
+
+    for (const reviewerId of reviewerIds) {
+      await createNotification(fastify, {
+        organizationId,
+        userId: reviewerId,
+        type: 'LEAVE_REQUESTED',
+        title: 'Leave request awaiting review',
+        body: `${staffUser?.fullName ?? 'Staff'} requested leave for ${assignment.shiftName} on ${item.workDate}.`,
+        dedupeKey: `leave-requested:${created.id}:${reviewerId}`,
+        metadata: { leaveRequestId: created.id, staffProfileId: profile.id, workDate: item.workDate },
+      });
+    }
+
+    createdLeaves.push(
+      mapLeave({
+        leave: created,
+        staffName: staffUser?.fullName ?? '',
+        staffCode: staffUser?.staffCode ?? '',
+        premisesName: assignment.premisesName,
+        shiftName: assignment.shiftName,
+        startTime: assignment.startTime,
+        endTime: assignment.endTime,
+      })
+    );
+  }
+
+  return createdLeaves;
 }
 
 export async function listLeaveRequests(
@@ -241,7 +345,7 @@ export async function listLeaveRequests(
 ) {
   const conditions = [eq(schema.leaveRequests.organizationId, organizationId)];
 
-  if (user.role === 'STAFF') {
+  if (user.role === 'EMPLOYEE') {
     const profile = await findStaffProfile(fastify, user.userId, organizationId);
     if (!profile) {
       return [];
@@ -305,7 +409,7 @@ export async function getLeaveRequestDetails(
     eq(schema.leaveRequests.organizationId, organizationId),
   ];
 
-  if (user.role === 'STAFF') {
+  if (user.role === 'EMPLOYEE') {
     const profile = await findStaffProfile(fastify, user.userId, organizationId);
     if (!profile) {
       throw new AppError('Leave request not found', 404, 'LEAVE_REQUEST_NOT_FOUND');
@@ -441,7 +545,7 @@ export async function reviewLeaveRequest(
         existingAttendance &&
         (existingAttendance.clockInAt !== null ||
           existingAttendance.clockOutAt !== null ||
-          ['PRESENT', 'LATE', 'HALF_DAY'].includes(existingAttendance.status))
+          ['PRESENT', 'HALF_DAY'].includes(existingAttendance.status))
       ) {
         throw new AppError(
           'Cannot approve leave: Conflicting attendance or clock-in record exists for this date. A manager must resolve the conflict first.',
@@ -588,15 +692,6 @@ export async function reviewLeaveRequest(
     });
   }
 
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: `LEAVE_${input.decision}`,
-    resourceType: 'leave_request',
-    resourceId: leaveRequestId,
-    metadata: { remarks },
-  });
-
   return mapLeave({
     leave: updatedLeave,
     staffName: row.staffName,
@@ -646,14 +741,6 @@ export async function cancelLeaveRequest(
     .update(schema.leaveRequests)
     .set({ status: 'CANCELLED', updatedAt: new Date() })
     .where(eq(schema.leaveRequests.id, leaveRequestId));
-
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: userId,
-    action: 'LEAVE_CANCELLED',
-    resourceType: 'leave_request',
-    resourceId: leaveRequestId,
-  });
 
   return { id: leaveRequestId, status: 'CANCELLED' as const };
 }

@@ -125,7 +125,7 @@ export async function organizationRoutes(fastify: FastifyInstance) {
   server.post(
     '/api/v1/organizations/members/:userId/deactivate',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Deactivate a member of the organization',
         tags: ['Organizations'],

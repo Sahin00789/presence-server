@@ -2,12 +2,12 @@ import { FastifyInstance } from 'fastify';
 import { and, desc, eq } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
-import { writeAuditLog } from '../../shared/services/audit.service.js';
 import { ensureStaffProfile, findStaffProfile } from '../../shared/services/staff.service.js';
 import { isOvernightShift, parseTimeToMinutes } from '../../shared/utils/datetime.js';
+import { getAssignedDayNumbers } from '../shifts/service.js';
 import { CreateOvertimeInput } from './schemas.js';
 
-type Actor = { userId: string; role: 'OWNER' | 'MANAGER' | 'STAFF' };
+type Actor = { userId: string; role: 'OWNER' | 'EMPLOYEE' };
 
 /** Net planned overtime minutes for a time window (overnight shifts included). */
 export function plannedOvertimeMinutes(startTime: string, endTime: string): number {
@@ -31,7 +31,7 @@ export async function listOvertime(
 ) {
   const conditions = [eq(schema.overtime.organizationId, organizationId)];
 
-  if (actor.role === 'STAFF') {
+  if (actor.role === 'EMPLOYEE') {
     const profile = await findStaffProfile(fastify, actor.userId, organizationId);
     if (!profile) {
       return [];
@@ -105,9 +105,9 @@ export async function createOvertime(
   organizationId: string,
   input: CreateOvertimeInput
 ) {
-  if (actor.role === 'STAFF') {
+  if (actor.role === 'EMPLOYEE') {
     throw new AppError(
-      'Only Owners and Managers can raise overtime',
+      'Only Owners can raise overtime',
       403,
       'OVERTIME_FORBIDDEN'
     );
@@ -115,15 +115,8 @@ export async function createOvertime(
 
   const targetProfileId = input.staffProfileId;
   if (!targetProfileId) {
-    if (actor.role === 'MANAGER') {
-      throw new AppError(
-        'Managers cannot create their own overtime. Ask the Owner to raise it.',
-        403,
-        'OVERTIME_FORBIDDEN'
-      );
-    }
     throw new AppError(
-      'Select a Manager or Staff member for this overtime.',
+      'Select an employee for this overtime.',
       400,
       'OVERTIME_TARGET_REQUIRED'
     );
@@ -148,17 +141,6 @@ export async function createOvertime(
 
   if (!targetProfile) {
     throw new AppError('Staff member not found', 404, 'STAFF_PROFILE_NOT_FOUND');
-  }
-
-  // Owners may raise overtime for Managers and Staff. Managers may only raise
-  // overtime for Staff members; a Manager's overtime must be created by the
-  // Owner.
-  if (targetProfile.role === 'MANAGER' && actor.role !== 'OWNER') {
-    throw new AppError(
-      'Only the Owner can create overtime for a Manager.',
-      403,
-      'OVERTIME_FORBIDDEN'
-    );
   }
 
   if (!targetProfile.premisesId) {
@@ -255,21 +237,6 @@ export async function createOvertime(
     })
     .returning();
 
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actor.userId,
-    action: 'OVERTIME_CREATED',
-    resourceType: 'overtimeRequest',
-    resourceId: created.id,
-    metadata: {
-      staffProfileId: targetProfileId,
-      workDate: input.workDate,
-      plannedMinutes,
-      paymentInr: input.paymentInr,
-      selfAssigned: !input.staffProfileId,
-    },
-  });
-
   const [staff] = await fastify.db
     .select({
       fullName: schema.users.fullName,
@@ -341,14 +308,6 @@ export async function cancelOvertime(
     .set({ status: 'CANCELLED', resolvedAt: new Date() })
     .where(eq(schema.overtime.id, overtimeId))
     .returning();
-
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actor.userId,
-    action: 'OVERTIME_CANCELLED',
-    resourceType: 'overtimeRequest',
-    resourceId: overtimeId,
-  });
 
   return { id: updated.id, status: updated.status };
 }

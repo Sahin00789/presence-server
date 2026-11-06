@@ -503,7 +503,7 @@ export async function sendOrganizationWelcomeEmail(params: SendOrganizationWelco
 export interface SendMonthlyReportEmailParams {
   to: string;
   recipientName: string;
-  role: 'OWNER' | 'MANAGER' | 'STAFF';
+  role: 'OWNER' | 'EMPLOYEE';
   organizationName: string;
   month: number;
   year: number;

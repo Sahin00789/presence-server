@@ -25,7 +25,7 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
   server.post(
     '/api/v1/attendance/clock-in',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('MANAGER', 'STAFF')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
       schema: {
         description: 'Clock in with location and face verification',
         tags: ['Attendance'],
@@ -46,12 +46,10 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
     }
   );
 
-
-
   server.post(
     '/api/v1/attendance/manual-mark',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Manual mark attendance for shift/overtime (ABSENT/HALF_DAY/LEAVE or delete overtime). Available after clock-in and before shift/overtime ends.',
         tags: ['Attendance'],
@@ -79,15 +77,13 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
     }
   );
 
-
-
   server.get(
     '/api/v1/attendance/records',
     {
       preHandler: [fastify.authenticate],
       schema: {
         description:
-          'List attendance events. Staff receive their own records, Owners and Managers receive the whole organization.',
+          'List attendance events. Employees receive their own records, Owners receive the whole organization.',
         tags: ['Attendance'],
         querystring: attendanceRecordsQuerySchema,
         response: {
@@ -106,12 +102,10 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
     }
   );
 
-
-
   server.get(
     '/api/v1/attendance/daily',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'MANAGER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
         description: 'Retrieve daily attendance records by date and optional premises',
         tags: ['Attendance'],
@@ -136,12 +130,10 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
     }
   );
 
-
-
   server.get(
     '/api/v1/attendance/my-history',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('MANAGER', 'STAFF')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
       schema: {
         description: 'Retrieve employee daily attendance and earnings history',
         tags: ['Attendance'],
@@ -180,7 +172,7 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
   server.get(
     '/api/v1/attendance/upcoming',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('MANAGER', 'STAFF')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
       schema: {
         description: 'Fetch upcoming shift or overtime for the authenticated user',
         tags: ['Attendance'],

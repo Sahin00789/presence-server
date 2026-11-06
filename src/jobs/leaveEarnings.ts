@@ -60,7 +60,7 @@ export async function postLeaveEarnings(
       if (
         existingAttendance &&
         (existingAttendance.clockInAt !== null ||
-          ['PRESENT', 'LATE', 'HALF_DAY'].includes(existingAttendance.status))
+          ['PRESENT', 'HALF_DAY'].includes(existingAttendance.status))
       ) {
         continue;
       }

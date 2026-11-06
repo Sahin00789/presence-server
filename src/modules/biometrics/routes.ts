@@ -29,7 +29,7 @@ export const biometricsRoutes: FastifyPluginAsync = async (fastify) => {
     {
       preHandler: [
         fastify.authenticate,
-        fastify.authorizeRoles('OWNER', 'MANAGER'),
+        fastify.authorizeRoles('OWNER'),
         fastify.rateLimit({
           limit: 10,
           windowSeconds: 60,

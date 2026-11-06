@@ -58,6 +58,8 @@ export const attendanceEventSchema = z.object({
 
 export const attendanceRecordSchema = z.object({
   id: z.string().uuid(),
+  organizationId: z.string().uuid().optional(),
+  employeeId: z.string().uuid().optional(),
   staffProfileId: z.string().uuid(),
   staffName: z.string().optional(),
   staffEmail: z.string().optional(),
@@ -66,11 +68,16 @@ export const attendanceRecordSchema = z.object({
   clockIn: z.date().or(z.string()).nullable().optional(),
   clockOut: z.date().or(z.string()).nullable().optional(),
   status: z.string(),
+  attendanceType: z.string().optional(),
+  shiftName: z.string().nullable().optional(),
+  assignedStartTime: z.string().nullable().optional(),
+  assignedEndTime: z.string().nullable().optional(),
   faceVerified: z.boolean().optional(),
   geofenceVerified: z.boolean().optional(),
   workedMinutes: z.number().int().optional(),
   overtimeMinutes: z.number().int().optional(),
   scheduledMinutes: z.number().int().optional(),
+  lateMinutes: z.number().int().optional(),
   premisesId: z.string().uuid().nullable().optional(),
   overtimeId: z.string().uuid().nullable().optional(),
 });
@@ -96,7 +103,7 @@ export const exceptionSchema = z.object({
 });
 
 export const resolveExceptionSchema = z.object({
-  correctedStatus: z.enum(['PRESENT', 'ABSENT', 'HALF_DAY', 'LATE', 'HOLIDAY', 'LEAVE']),
+  correctedStatus: z.enum(['PRESENT', 'ABSENT', 'HALF_DAY', 'HOLIDAY', 'LEAVE']),
   reason: z.string().min(2),
   note: z.string().optional(),
 });

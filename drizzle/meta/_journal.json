@@ -36,6 +36,27 @@
       "when": 1793287036544,
       "tag": "0004_sloppy_rhodey",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1793527069968,
+      "tag": "0005_role_enum_fix",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793527229753,
+      "tag": "0006_loving_exiles",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793886983036,
+      "tag": "0007_known_shinobi_shaw",
+      "breakpoints": true
     }
   ]
 }

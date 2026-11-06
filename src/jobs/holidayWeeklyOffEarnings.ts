@@ -67,9 +67,11 @@ export async function postHolidayAndWeeklyOffEarnings(
     .from(schema.holidayCalendars)
     .where(and(gte(schema.holidayCalendars.date, from), lte(schema.holidayCalendars.date, to)));
 
-  const holidayByOrgDate = new Map<string, typeof holidaysList[0]>();
+  const holidayByOrgPremisesDate = new Map<string, typeof holidaysList[0]>();
   for (const h of holidaysList) {
-    holidayByOrgDate.set(`${h.organizationId}::${String(h.date)}`, h);
+    if (h.premisesId) {
+      holidayByOrgPremisesDate.set(`${h.organizationId}::${h.premisesId}::${String(h.date)}`, h);
+    }
   }
 
   const employees = await fastify.db
@@ -93,8 +95,8 @@ export async function postHolidayAndWeeklyOffEarnings(
     for (const emp of employees) {
       if (!emp.premisesId) continue;
 
-      const holidayKey = `${emp.organizationId}::${date}`;
-      const holiday = holidayByOrgDate.get(holidayKey);
+      const holidayKey = `${emp.organizationId}::${emp.premisesId}::${date}`;
+      const holiday = holidayByOrgPremisesDate.get(holidayKey);
 
       if (holiday) {
         if (holiday.isPaid === false) {

@@ -2,7 +2,6 @@ import { FastifyInstance } from 'fastify';
 import { and, asc, eq, gte, lte, ne, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
-import { writeAuditLog } from '../../shared/services/audit.service.js';
 import {
   dayOfWeek,
   enumerateDates,
@@ -144,15 +143,6 @@ export async function createShift(
     })
     .returning();
 
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'SHIFT_CREATED',
-    resourceType: 'shift',
-    resourceId: created.id,
-    metadata: { shiftName: created.shiftName },
-  });
-
   if (fastify.cache) {
     fastify.cache.invalidateTag(`org:${organizationId}:shifts`);
   }
@@ -214,15 +204,6 @@ export async function updateShift(
     )
     .returning();
 
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'SHIFT_UPDATED',
-    resourceType: 'shift',
-    resourceId: updated.id,
-    metadata: { shiftName: updated.shiftName },
-  });
-
   if (fastify.cache) {
     fastify.cache.invalidateTag(`org:${organizationId}:shifts`);
   }
@@ -272,14 +253,6 @@ export async function deleteShift(
         eq(schema.shifts.organizationId, organizationId)
       )
     );
-
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'SHIFT_DELETED',
-    resourceType: 'shift',
-    resourceId: shiftId,
-  });
 
   if (fastify.cache) {
     fastify.cache.invalidateTag(`org:${organizationId}:shifts`);
@@ -408,15 +381,6 @@ export async function createShiftAssignment(
     })
     .returning();
 
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'SHIFT_ASSIGNMENT_CREATED',
-    resourceType: 'employee_shift_assignment',
-    resourceId: created.id,
-    metadata: { employeeId: targetStaffId, shiftId: input.shiftId },
-  });
-
   await autoSetWeeklyOffsFromShiftAssignments(
     fastify,
     organizationId,
@@ -489,14 +453,6 @@ export async function updateShiftAssignment(
     )
     .returning();
 
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'SHIFT_ASSIGNMENT_UPDATED',
-    resourceType: 'employee_shift_assignment',
-    resourceId: updated.id,
-  });
-
   await autoSetWeeklyOffsFromShiftAssignments(
     fastify,
     organizationId,
@@ -556,14 +512,6 @@ export async function deleteShiftAssignment(
         eq(schema.employeeShiftAssignments.organizationId, organizationId)
       )
     );
-
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'SHIFT_ASSIGNMENT_DELETED',
-    resourceType: 'employee_shift_assignment',
-    resourceId: assignmentId,
-  });
 
   await autoSetWeeklyOffsFromShiftAssignments(
     fastify,
@@ -707,15 +655,6 @@ export async function setWeeklyOffs(
     }
   });
 
-  await writeAuditLog(fastify, {
-    organizationId,
-    actorId: actorUserId,
-    action: 'WEEKLY_OFFS_UPDATED',
-    resourceType: 'employee',
-    resourceId: staffProfileId,
-    metadata: { daysOfWeek: uniqueDays },
-  });
-
   return { staffProfileId, daysOfWeek: uniqueDays };
 }
 
@@ -723,11 +662,13 @@ export async function listHolidays(
   fastify: FastifyInstance,
   organizationId: string,
   from?: string,
-  to?: string
+  to?: string,
+  premisesId?: string
 ): Promise<any[]> {
   const conditions = [eq(schema.holidayCalendars.organizationId, organizationId)];
   if (from) conditions.push(gte(schema.holidayCalendars.date, from));
   if (to) conditions.push(lte(schema.holidayCalendars.date, to));
+  if (premisesId) conditions.push(eq(schema.holidayCalendars.premisesId, premisesId));
 
   const rows = await fastify.db
     .select()
@@ -738,7 +679,7 @@ export async function listHolidays(
   return rows.map((r) => ({
     id: r.id,
     organizationId: r.organizationId,
-    premisesId: (r as any).premisesId ?? null,
+    premisesId: r.premisesId,
     name: r.name,
     date: String(r.date),
     isPaid: r.isPaid,
@@ -749,23 +690,23 @@ export async function createHoliday(
   fastify: FastifyInstance,
   organizationId: string,
   actorUserId: string,
-  input: any
+  input: { name: string; date: string; premisesId: string; isPaid?: boolean }
 ): Promise<any> {
   const [created] = await fastify.db
     .insert(schema.holidayCalendars)
     .values({
       organizationId,
+      premisesId: input.premisesId,
       name: input.name,
       date: input.date,
       isPaid: input.isPaid ?? true,
-      ...(input.premisesId ? { premisesId: input.premisesId } : {}),
-    } as any)
+    })
     .returning();
 
   return {
     id: created.id,
     organizationId: created.organizationId,
-    premisesId: (created as any).premisesId ?? null,
+    premisesId: created.premisesId,
     name: created.name,
     date: String(created.date),
     isPaid: created.isPaid,
@@ -797,7 +738,19 @@ export async function buildSchedule(
   toDate: string,
   timezone: string
 ): Promise<any[]> {
-  const holidays = await listHolidays(fastify, organizationId, fromDate, toDate);
+  const [emp] = await fastify.db
+    .select({ premisesId: schema.employees.premisesId })
+    .from(schema.employees)
+    .where(eq(schema.employees.id, staffProfileId))
+    .limit(1);
+
+  const holidays = await listHolidays(
+    fastify,
+    organizationId,
+    fromDate,
+    toDate,
+    emp?.premisesId ?? undefined
+  );
   const holidayByDate = new Map(holidays.map((holiday) => [holiday.date, holiday]));
 
   const weeklyOffRows = await fastify.db
@@ -814,6 +767,7 @@ export async function buildSchedule(
       startTime: schema.shifts.startTime,
       endTime: schema.shifts.endTime,
       halfDayThreshold: schema.shifts.halfDayThreshold,
+      dayName: schema.shifts.dayName,
     })
     .from(schema.employeeShiftAssignments)
     .innerJoin(schema.shifts, eq(schema.employeeShiftAssignments.shiftId, schema.shifts.id))
@@ -829,7 +783,9 @@ export async function buildSchedule(
   return dates.map((date) => {
     const dow = dayOfWeek(date);
     const holiday = holidayByDate.get(date);
-    const assignment = assignments[0];
+    const assignment = assignments.find((a) =>
+      getAssignedDayNumbers(a.dayName).includes(dow)
+    );
 
     if (holiday) {
       return {
@@ -937,6 +893,7 @@ export async function resolveAssignmentForDate(
       startTime: schema.shifts.startTime,
       endTime: schema.shifts.endTime,
       halfDayThreshold: schema.shifts.halfDayThreshold,
+      dayName: schema.shifts.dayName,
     })
     .from(schema.employeeShiftAssignments)
     .innerJoin(schema.shifts, eq(schema.employeeShiftAssignments.shiftId, schema.shifts.id))
@@ -947,12 +904,15 @@ export async function resolveAssignmentForDate(
       )
     );
 
-  if (rows[0]) {
+  const targetDow = new Date(`${date}T00:00:00Z`).getUTCDay();
+  const match = rows.find((r) => getAssignedDayNumbers(r.dayName).includes(targetDow));
+
+  if (match) {
     return {
-      assignmentId: rows[0].assignmentId,
-      templateId: rows[0].templateId,
-      startTime: rows[0].startTime,
-      endTime: rows[0].endTime,
+      assignmentId: match.assignmentId,
+      templateId: match.templateId,
+      startTime: match.startTime,
+      endTime: match.endTime,
       breakMinutes: 0,
       lateGraceMinutes: 15,
       halfDayThresholdMinutes: 240,

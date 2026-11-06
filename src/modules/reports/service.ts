@@ -9,7 +9,6 @@ import {
 import { buildAttendanceSummary, listAttendanceRecords } from '../attendance/service.js';
 import { buildSchedule, resolveTimezone } from '../shifts/service.js';
 import { listMonthlyPayrollSummaries } from '../payroll/service.js';
-import { listAuditLogs } from '../audit/service.js';
 import { toDateISOInTimeZone } from '../../shared/utils/datetime.js';
 import { formatMinorUnits } from '../../shared/utils/money.js';
 import { buildPdfReport } from '../../shared/utils/pdf.js';
@@ -77,7 +76,7 @@ function formatMoney(paise: number): string {
 
 export async function getDashboardSummary(
   fastify: FastifyInstance,
-  user: { userId: string; role: 'OWNER' | 'MANAGER' | 'STAFF' },
+  user: { userId: string; role: 'OWNER' | 'EMPLOYEE' },
   organizationId: string
 ) {
   const timezone = await resolveTimezone(fastify, organizationId);
@@ -85,7 +84,7 @@ export async function getDashboardSummary(
   const monthStart = `${today.slice(0, 7)}-01`;
   const generatedAt = new Date().toISOString();
 
-  if (user.role === 'STAFF') {
+  if (user.role === 'EMPLOYEE') {
     const profile = await findStaffProfile(fastify, user.userId, organizationId);
     if (!profile) {
       throw new AppError('Staff profile not found', 404, 'STAFF_PROFILE_NOT_FOUND');
@@ -208,10 +207,9 @@ export async function getDashboardSummary(
     generatedAt,
     organization: {
       staffCount: staff.length,
-      presentToday: countFor(['PRESENT', 'LATE', 'HALF_DAY']),
-      lateToday: countFor(['LATE']),
+      presentToday: countFor(['PRESENT', 'HALF_DAY']),
       absentToday: countFor(['ABSENT']),
-      leaveToday: countFor(['LEAVE', 'ON_LEAVE', 'PAID_LEAVE']),
+      leaveToday: countFor(['LEAVE']),
       openExceptions: Number(openExceptions?.count ?? 0),
       pendingLeaveRequests: Number(pendingLeave?.count ?? 0),
       latestPayrollPeriod: latest
@@ -230,7 +228,7 @@ export async function getDashboardSummary(
 
 export async function buildAttendanceReport(
   fastify: FastifyInstance,
-  user: { userId: string; role: 'OWNER' | 'MANAGER' | 'STAFF' },
+  user: { userId: string; role: 'OWNER' | 'EMPLOYEE' },
   organizationId: string,
   query: { from?: string; to?: string; staffProfileId?: string }
 ): Promise<ReportTable> {
@@ -280,7 +278,6 @@ export async function buildPayrollReport(
       staffCode: schema.employees.employeeCode,
       staffName: schema.users.fullName,
       earnedAmount: schema.monthlyPayrolls.earnedAmount,
-      deductionAmount: schema.monthlyPayrolls.deductionAmount,
       paidAmount: schema.monthlyPayrolls.paidAmount,
       dueAmount: schema.monthlyPayrolls.dueAmount,
       status: schema.monthlyPayrolls.status,
@@ -310,7 +307,6 @@ export async function buildPayrollReport(
       'Staff Code',
       'Staff Name',
       'Earned',
-      'Deductions',
       'Paid',
       'Due',
       'Due (INR)',
@@ -320,43 +316,10 @@ export async function buildPayrollReport(
       item.staffCode ?? '',
       item.staffName ?? '',
       item.earnedAmount,
-      item.deductionAmount,
       item.paidAmount,
       item.dueAmount,
       formatMoney(Math.round(Number(item.dueAmount) * 100)),
       item.status,
     ]],
-  };
-}
-
-export async function buildAuditReport(
-  fastify: FastifyInstance,
-  user: { userId: string; role: 'OWNER' | 'MANAGER' | 'STAFF' },
-  organizationId: string,
-  query: {
-    from?: string;
-    to?: string;
-    action?: string;
-    resourceType?: string;
-  }
-): Promise<ReportTable> {
-  const rows = await listAuditLogs(fastify, user, organizationId, {
-    ...query,
-    limit: 500,
-    offset: 0,
-  });
-
-  return {
-    title: 'Audit Trail Report',
-    subtitle: `${query.from ?? 'beginning'} to ${query.to ?? 'now'}`,
-    columns: ['Timestamp', 'Action', 'Resource Type', 'Resource ID', 'Actor ID', 'Metadata'],
-    rows: rows.map((row) => [
-      new Date(row.createdAt as Date).toISOString(),
-      row.action,
-      row.resourceType,
-      row.resourceId ?? '',
-      row.actorId ?? '',
-      row.metadata ? JSON.stringify(row.metadata) : '',
-    ]),
   };
 }
