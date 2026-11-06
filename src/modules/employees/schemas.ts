@@ -48,6 +48,7 @@ export const employeeDtoSchema = z.object({
 });
 
 export const updateEmployeeSchema = z.object({
+  email: z.string().email().trim().toLowerCase().optional(),
   fullName: z.string().trim().min(2).optional(),
   department: z.string().trim().nullable().optional(),
   designation: z.string().trim().nullable().optional(),

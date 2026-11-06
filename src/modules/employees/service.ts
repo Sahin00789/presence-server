@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { and, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, ne, or, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
 import { generateStaffCode } from '../../shared/services/staff.service.js';
@@ -500,6 +500,65 @@ export async function updateEmployee(
     }
   }
 
+  let newEmail: string | undefined = undefined;
+  if (input.email !== undefined && actorRole === 'OWNER') {
+    newEmail = input.email.trim().toLowerCase();
+    if (newEmail.length > 0) {
+      const [orgRecord] = await fastify.db
+        .select({ ownerUserId: schema.organizations.ownerUserId })
+        .from(schema.organizations)
+        .where(eq(schema.organizations.id, organizationId))
+        .limit(1);
+
+      if (orgRecord?.ownerUserId) {
+        const [ownerUser] = await fastify.db
+          .select({ email: schema.users.email })
+          .from(schema.users)
+          .where(eq(schema.users.id, orgRecord.ownerUserId))
+          .limit(1);
+
+        if (ownerUser && ownerUser.email.toLowerCase() === newEmail) {
+          throw new AppError(
+            'The organization owner email cannot be used as an employee email.',
+            400,
+            'OWNER_CANNOT_BE_EMPLOYEE'
+          );
+        }
+      }
+
+      if (employee.userId) {
+        const [currentUser] = await fastify.db
+          .select({ email: schema.users.email })
+          .from(schema.users)
+          .where(eq(schema.users.id, employee.userId))
+          .limit(1);
+
+        if (currentUser && currentUser.email.toLowerCase() !== newEmail) {
+          const [existingUser] = await fastify.db
+            .select({ id: schema.users.id })
+            .from(schema.users)
+            .where(
+              and(
+                eq(schema.users.email, newEmail),
+                ne(schema.users.id, employee.userId)
+              )
+            )
+            .limit(1);
+
+          if (existingUser) {
+            throw new AppError(
+              'The requested email address is already in use by another user account.',
+              400,
+              'EMAIL_ALREADY_EXISTS'
+            );
+          }
+        }
+      }
+    } else {
+      newEmail = undefined;
+    }
+  }
+
   let uploadedAvatarUrl: string | undefined = input.avatarUrl ?? undefined;
   if (input.avatarBase64) {
     try {
@@ -529,21 +588,47 @@ export async function updateEmployee(
       empUpdates.address = input.address;
     }
 
+    let targetUserId = employee.userId;
+
+    if (!targetUserId && newEmail) {
+      let [existingUser] = await tx
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.email, newEmail))
+        .limit(1);
+
+      if (!existingUser) {
+        [existingUser] = await tx
+          .insert(schema.users)
+          .values({
+            email: newEmail,
+            fullName: input.fullName || employee.name,
+            isActive: true,
+            phone: input.phone || null,
+            avatarUrl: uploadedAvatarUrl || null,
+          })
+          .returning();
+      }
+      targetUserId = existingUser.id;
+      empUpdates.userId = targetUserId;
+    }
+
     await tx
       .update(schema.employees)
       .set(empUpdates)
       .where(eq(schema.employees.id, employeeId));
 
-    if (employee.userId) {
+    if (targetUserId) {
       const userUpdates: Record<string, any> = { updatedAt: new Date() };
       if (input.fullName !== undefined) userUpdates.fullName = input.fullName;
+      if (newEmail !== undefined) userUpdates.email = newEmail;
       if (input.phone !== undefined) userUpdates.phone = input.phone;
       if (uploadedAvatarUrl !== undefined) userUpdates.avatarUrl = uploadedAvatarUrl;
 
       await tx
         .update(schema.users)
         .set(userUpdates)
-        .where(eq(schema.users.id, employee.userId));
+        .where(eq(schema.users.id, targetUserId));
     }
   });
 
