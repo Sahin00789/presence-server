@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { roleSchema } from '../auth/schemas.js';
+import { roleSchema, normalizedEmailSchema } from '../auth/schemas.js';
 
 export const createEmployeeSchema = z.object({
-  email: z.string().email().trim().toLowerCase(),
+  email: normalizedEmailSchema,
   role: z.preprocess(
     (val) => (val === 'STAFF' || val === 'MANAGER' ? 'EMPLOYEE' : val),
     z.enum(['EMPLOYEE']).optional().default('EMPLOYEE')
@@ -48,7 +48,11 @@ export const employeeDtoSchema = z.object({
 });
 
 export const updateEmployeeSchema = z.object({
-  email: z.string().email().trim().toLowerCase().optional(),
+  email: z
+    .preprocess(
+      (val) => (typeof val === 'string' && val.trim() === '' ? null : val),
+      normalizedEmailSchema.nullable().optional()
+    ),
   fullName: z.string().trim().min(2).optional(),
   department: z.string().trim().nullable().optional(),
   designation: z.string().trim().nullable().optional(),

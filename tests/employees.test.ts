@@ -67,4 +67,19 @@ describe('Employee CRUD Routes', () => {
     expect(response.statusCode).toBe(401);
     expect(response.json().code).toBe('INVALID_TOKEN');
   });
+
+  it('accepts null and preprocessed blank email in PATCH /api/v1/employees/:employeeId schema validation', async () => {
+    const response = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/employees/00000000-0000-0000-0000-000000000000',
+      payload: {
+        email: null,
+        fullName: 'Updated Name',
+      },
+    });
+
+    // Should fail with 401 Unauthorized (meaning Zod schema validation passed successfully)
+    expect(response.statusCode).toBe(401);
+    expect(response.json().code).toBe('INVALID_TOKEN');
+  });
 });

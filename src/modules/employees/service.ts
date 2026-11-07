@@ -501,9 +501,13 @@ export async function updateEmployee(
   }
 
   let newEmail: string | undefined = undefined;
-  if (input.email !== undefined && actorRole === 'OWNER') {
-    newEmail = input.email.trim().toLowerCase();
-    if (newEmail.length > 0) {
+  let remappedUserId: string | undefined = undefined;
+
+  if (input.email !== undefined && input.email !== null && actorRole === 'OWNER') {
+    const trimmed = input.email.trim().toLowerCase();
+    if (trimmed.length > 0) {
+      newEmail = trimmed;
+
       const [orgRecord] = await fastify.db
         .select({ ownerUserId: schema.organizations.ownerUserId })
         .from(schema.organizations)
@@ -526,6 +530,7 @@ export async function updateEmployee(
         }
       }
 
+      let currentEmail: string | null = null;
       if (employee.userId) {
         const [currentUser] = await fastify.db
           .select({ email: schema.users.email })
@@ -533,29 +538,42 @@ export async function updateEmployee(
           .where(eq(schema.users.id, employee.userId))
           .limit(1);
 
-        if (currentUser && currentUser.email.toLowerCase() !== newEmail) {
-          const [existingUser] = await fastify.db
-            .select({ id: schema.users.id })
-            .from(schema.users)
+        currentEmail = currentUser?.email.toLowerCase() ?? null;
+      }
+
+      if (currentEmail !== newEmail) {
+        const [existingUser] = await fastify.db
+          .select({ id: schema.users.id })
+          .from(schema.users)
+          .where(eq(schema.users.email, newEmail))
+          .limit(1);
+
+        if (existingUser) {
+          const [existingOrgEmp] = await fastify.db
+            .select({ id: schema.employees.id })
+            .from(schema.employees)
             .where(
               and(
-                eq(schema.users.email, newEmail),
-                ne(schema.users.id, employee.userId)
+                eq(schema.employees.organizationId, organizationId),
+                eq(schema.employees.userId, existingUser.id),
+                ne(schema.employees.id, employeeId)
               )
             )
             .limit(1);
 
-          if (existingUser) {
+          if (existingOrgEmp) {
             throw new AppError(
-              'The requested email address is already in use by another user account.',
-              400,
-              'EMAIL_ALREADY_EXISTS'
+              'This person is already an employee of the organization',
+              409,
+              'ALREADY_AN_EMPLOYEE'
             );
           }
+
+          remappedUserId = existingUser.id;
         }
+      } else {
+        newEmail = undefined;
       }
-    } else {
-      newEmail = undefined;
     }
   }
 
@@ -590,7 +608,10 @@ export async function updateEmployee(
 
     let targetUserId = employee.userId;
 
-    if (!targetUserId && newEmail) {
+    if (remappedUserId) {
+      targetUserId = remappedUserId;
+      empUpdates.userId = targetUserId;
+    } else if (!targetUserId && newEmail) {
       let [existingUser] = await tx
         .select()
         .from(schema.users)
@@ -619,9 +640,9 @@ export async function updateEmployee(
       .where(eq(schema.employees.id, employeeId));
 
     if (targetUserId) {
-      const userUpdates: Record<string, any> = { updatedAt: new Date() };
+      const userUpdates: Record<string, any> = { updatedAt: new Date(), isActive: true };
       if (input.fullName !== undefined) userUpdates.fullName = input.fullName;
-      if (newEmail !== undefined) userUpdates.email = newEmail;
+      if (newEmail !== undefined && !remappedUserId) userUpdates.email = newEmail;
       if (input.phone !== undefined) userUpdates.phone = input.phone;
       if (uploadedAvatarUrl !== undefined) userUpdates.avatarUrl = uploadedAvatarUrl;
 

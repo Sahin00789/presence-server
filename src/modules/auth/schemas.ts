@@ -5,14 +5,19 @@ export const roleSchema = z.preprocess(
   z.enum(['OWNER', 'EMPLOYEE'])
 );
 
+export const normalizedEmailSchema = z.preprocess(
+  (val) => (typeof val === 'string' ? val.replace(/[\s\u00A0]+/g, '').toLowerCase() : val),
+  z.string().email('Please enter a valid email address')
+);
+
 export const otpRequestSchema = z.object({
-  email: z.string().email().trim().toLowerCase(),
+  email: normalizedEmailSchema,
   role: roleSchema.optional().default('EMPLOYEE'),
   isRegistration: z.boolean().optional().default(false),
 });
 
 export const otpVerifySchema = z.object({
-  email: z.string().email().trim().toLowerCase(),
+  email: normalizedEmailSchema,
   code: z.string().trim().regex(/^\d{6}$/, 'OTP must be 6 digits'),
   role: roleSchema.optional().default('EMPLOYEE'),
   fullName: z.string().trim().min(2).optional(),

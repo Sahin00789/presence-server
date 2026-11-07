@@ -36,6 +36,12 @@ function getTransporter(): Transporter | null {
   return transporter;
 }
 
+function getMailSenderInfo(): { from: string; replyTo: string } {
+  const from = process.env.SMTP_FROM || env.SMTP_FROM;
+  const replyTo = process.env.SMTP_REPLY_TO || from;
+  return { from, replyTo };
+}
+
 export interface SendOtpEmailParams {
   to: string;
   code: string;
@@ -185,14 +191,21 @@ export async function sendOtpEmail(params: SendOtpEmailParams): Promise<boolean>
   `;
 
   const text = `Presence Verification Code: ${params.code}\n\nThis code is valid for 10 minutes. Do not share this code with anyone.`;
+  const { from, replyTo } = getMailSenderInfo();
 
   try {
     const info = await mailTransporter.sendMail({
-      from: env.SMTP_FROM,
+      from,
+      replyTo,
       to: params.to,
       subject,
       text,
       html,
+      headers: {
+        'X-Mailer': 'Presence Staff Management System',
+        'X-Priority': '1 (Highest)',
+        'Importance': 'High',
+      },
     });
 
     if (params.logger) {
@@ -316,10 +329,12 @@ export async function sendUserCreationEmail(params: SendUserCreationEmailParams)
   `;
 
   const text = `You've been added to ${params.organizationName} as a ${params.role} on Presence.\nSign in to the Presence app with ${params.to} to access your workspace.`;
+  const { from, replyTo } = getMailSenderInfo();
 
   try {
     const info = await mailTransporter.sendMail({
-      from: env.SMTP_FROM,
+      from,
+      replyTo,
       to: params.to,
       subject,
       text,
@@ -475,10 +490,12 @@ export async function sendOrganizationWelcomeEmail(params: SendOrganizationWelco
   `;
 
   const text = `Welcome to Presence, ${params.ownerName}!\n\nYour workspace ${params.organizationName} has been created successfully.${params.premisesName ? `\nPrimary Premises: ${params.premisesName}` : ''}\n\nSign in to the Presence app to start managing staff, shifts, and attendance.`;
+  const { from, replyTo } = getMailSenderInfo();
 
   try {
     const info = await mailTransporter.sendMail({
-      from: env.SMTP_FROM,
+      from,
+      replyTo,
       to: params.to,
       subject,
       text,
@@ -627,9 +644,12 @@ export async function sendMonthlyReportEmail(params: SendMonthlyReportEmailParam
     });
   }
 
+  const { from, replyTo } = getMailSenderInfo();
+
   try {
     const info = await mailTransporter.sendMail({
-      from: env.SMTP_FROM,
+      from,
+      replyTo,
       to: params.to,
       subject,
       text: `Hello ${params.recipientName},\n\nYour monthly ${params.role} summary report for ${monthName} ${params.year} at ${params.organizationName} is attached in PDF and Excel formats.`,

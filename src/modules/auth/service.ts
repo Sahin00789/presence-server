@@ -230,17 +230,26 @@ export async function requestOtp(
     );
   }
 
-  // Deliver OTP code via Mail Service asynchronously
-  setImmediate(() => {
-    sendOtpEmail({
+  // Deliver OTP code via Mail Service
+  try {
+    await sendOtpEmail({
       to: email,
       code,
       role,
       logger: fastify.log,
-    }).catch((mailErr) => {
-      fastify.log.error({ err: mailErr, email }, 'Failed to send OTP email');
     });
-  });
+  } catch (mailErr) {
+    fastify.log.error({ err: mailErr, email }, 'Failed to send OTP email via SMTP');
+    if (env.NODE_ENV === 'production') {
+      throw new AppError(
+        'Failed to deliver verification email. Please check your email address and try again.',
+        500,
+        'EMAIL_SEND_FAILED',
+        undefined,
+        { cause: mailErr }
+      );
+    }
+  }
 
   if (env.NODE_ENV === 'development' || env.NODE_ENV === 'test') {
     fastify.log.info(
