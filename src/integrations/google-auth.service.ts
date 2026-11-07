@@ -32,18 +32,13 @@ export class GoogleAuthService {
     this.oauth2Client = new OAuth2Client();
   }
 
-  /** Client IDs whose ID tokens are accepted: the primary client plus any extra (Android/installed) clients. */
+  /** Client ID whose ID tokens are accepted (web client ID). */
   allowedAudiences(): string[] {
-    const extra = (env.GOOGLE_EXTRA_CLIENT_IDS ?? '')
-      .split(',')
-      .map((clientId) => clientId.trim())
-      .filter(Boolean);
-
-    return Array.from(new Set([env.GOOGLE_WEB_CLIENT_ID, ...extra].filter(Boolean)));
+    return [env.GOOGLE_WEB_CLIENT_ID];
   }
 
   isAllowedAudience(audience?: string): boolean {
-    return Boolean(audience) && this.allowedAudiences().includes(audience!);
+    return Boolean(audience) && audience === env.GOOGLE_WEB_CLIENT_ID;
   }
 
   /**
@@ -55,10 +50,9 @@ export class GoogleAuthService {
     logger?: FastifyBaseLogger
   ): Promise<GoogleUserProfile> {
     try {
-      const audiences = this.allowedAudiences();
       const ticket = await this.oauth2Client.verifyIdToken({
         idToken,
-        audience: audiences.length === 1 ? audiences[0] : audiences,
+        audience: env.GOOGLE_WEB_CLIENT_ID,
       });
 
       const payload = ticket.getPayload();
@@ -77,7 +71,7 @@ export class GoogleAuthService {
 
       if (!this.isAllowedAudience(payload.aud)) {
         logger?.warn(
-          { aud: payload.aud, allowed: audiences },
+          { aud: payload.aud, expected: env.GOOGLE_WEB_CLIENT_ID },
           'Google token audience mismatch'
         );
         throw new AppError('Google ID token audience is invalid', 401, 'INVALID_AUDIENCE');

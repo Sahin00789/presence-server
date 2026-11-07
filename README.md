@@ -52,8 +52,7 @@ client ID as `serverClientId`, then posts the returned ID token:
 ```
 
 The server verifies the token with Google, checks issuer, email verification and
-that `aud` matches `GOOGLE_WEB_CLIENT_ID` or any ID in `GOOGLE_EXTRA_CLIENT_IDS`,
-then issues app JWTs.
+that `aud` matches `GOOGLE_WEB_CLIENT_ID`, then issues app JWTs.
 
 Response:
 
@@ -76,8 +75,7 @@ Response:
 ### 2. Server auth code flow
 
 If the app uses `GoogleSignInOptions.requestServerAuthCode(webClientId)`, post the
-code instead. **Do not send `redirectUri`** — Android server auth codes are not
-bound to one, and Google answers `redirect_uri_mismatch` if you do:
+code instead.
 
 ```json
 {
@@ -88,10 +86,8 @@ bound to one, and Google answers `redirect_uri_mismatch` if you do:
 ```
 
 The server exchanges the code using `GOOGLE_WEB_CLIENT_ID` +
-`GOOGLE_WEB_CLIENT_SECRET` and verifies the returned ID token. For browser
-redirect flows, pass `redirectUri` (it must match `GOOGLE_REDIRECT_URI`) and the
-`codeVerifier` if PKCE was used. If no secret is configured the endpoint answers
-`400 CODE_EXCHANGE_NOT_CONFIGURED`, so a secret-less (Android-only) deployment
+`GOOGLE_WEB_CLIENT_SECRET` and verifies the returned ID token. If no secret is configured the endpoint answers
+`400 CODE_EXCHANGE_NOT_CONFIGURED`, so a secret-less deployment
 still boots and can serve the `idToken` flow.
 
 ### Google Cloud console checklist
@@ -99,12 +95,7 @@ still boots and can serve the `idToken` flow.
 1. OAuth consent screen configured; app in *Testing* with test users, or published.
 2. **Web application** client → its ID is `GOOGLE_WEB_CLIENT_ID`, the secret goes in `.env`.
    Use this ID as the Android `serverClientId`; ID tokens then carry it as `aud`.
-3. **Android** client → package name + signing SHA-1 (debug and release). Android /
-   *installed* clients have **no client secret**, so they can only use the `idToken`
-   flow — put their ID in `GOOGLE_EXTRA_CLIENT_IDS` (comma separated) so tokens
-   minted for them are accepted too.
-4. Browser flow only: add `<host>/api/v1/auth/google/callback` as an authorized
-   redirect URI.
+3. **Android** client → package name + signing SHA-1 (debug and release).
 
 
 ## Auth security model
@@ -121,7 +112,7 @@ still boots and can serve the `idToken` flow.
 - Rate limits (per IP unless authenticated): OTP request 5/min, OTP verify 10/min,
   Google exchange 10/min, owner registration 5/min, refresh 30/min.
 - Google ID tokens are verified with Google, and the `iss`, `email_verified` and `aud`
-  (against `GOOGLE_WEB_CLIENT_ID` + `GOOGLE_EXTRA_CLIENT_IDS`) claims are enforced.
+  (against `GOOGLE_WEB_CLIENT_ID`) claims are enforced.
 
 ### Errors
 

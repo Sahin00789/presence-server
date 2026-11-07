@@ -39,18 +39,21 @@ jobs:
       CLOUDINARY_API_SECRET: ci-secret
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'pnpm'
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run typecheck
-      - run: pnpm run build
-      - run: pnpm run db:migrate
-      - run: pnpm run test
+          cache: 'npm'
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - run: npm run typecheck
+        working-directory: server
+      - run: npm run build
+        working-directory: server
+      - run: npm run db:migrate
+        working-directory: server
+      - run: npm run test
+        working-directory: server
 
   deploy:
     name: Deploy to VPS
@@ -71,9 +74,9 @@ jobs:
             cd /opt/presence
             git fetch origin main
             git reset --hard origin/main
-            pnpm install --frozen-lockfile
-            pnpm run build
-            pnpm run db:migrate
+            npm ci
+            npm run build
+            npm run db:migrate
             pm2 restart presence-api --update-env
             sleep 3
             for i in $(seq 1 30); do
@@ -84,3 +87,4 @@ jobs:
             done
             echo "Health check did not pass within 60s"
             exit 1
+

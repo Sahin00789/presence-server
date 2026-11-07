@@ -12,21 +12,8 @@ const envSchema = z.object({
 
   /** Web OAuth client ID. Android apps pass this as `serverClientId`, so ID tokens carry it as `aud`. */
   GOOGLE_WEB_CLIENT_ID: z.string().min(1),
-  /** Only needed for the authorization-code flow; installed/Android clients have no secret. */
+  /** Web OAuth client secret used when exchanging authorization codes. */
   GOOGLE_WEB_CLIENT_SECRET: z.preprocess(
-    (val) => (typeof val === 'string' && val.trim() === '' ? undefined : val),
-    z.string().min(1).optional()
-  ),
-  /**
-   * Only used by the browser redirect flow. Android `requestServerAuthCode` exchanges
-   * must omit it, so it stays optional.
-   */
-  GOOGLE_REDIRECT_URI: z.string().url().optional(),
-  /**
-   * Additional client IDs whose ID tokens are accepted, comma separated.
-   * Android/installed OAuth clients have no secret, so they belong here.
-   */
-  GOOGLE_EXTRA_CLIENT_IDS: z.preprocess(
     (val) => (typeof val === 'string' && val.trim() === '' ? undefined : val),
     z.string().min(1).optional()
   ),

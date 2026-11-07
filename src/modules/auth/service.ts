@@ -230,22 +230,22 @@ export async function requestOtp(
     );
   }
 
-  // Deliver OTP code via Mail Service asynchronously in production
-  if (env.NODE_ENV === 'production') {
-    setImmediate(() => {
-      sendOtpEmail({
-        to: email,
-        code,
-        role,
-        logger: fastify.log,
-      }).catch((mailErr) => {
-        fastify.log.error({ err: mailErr, email }, 'Failed to send OTP email in production');
-      });
+  // Deliver OTP code via Mail Service asynchronously
+  setImmediate(() => {
+    sendOtpEmail({
+      to: email,
+      code,
+      role,
+      logger: fastify.log,
+    }).catch((mailErr) => {
+      fastify.log.error({ err: mailErr, email }, 'Failed to send OTP email');
     });
-  } else {
+  });
+
+  if (env.NODE_ENV === 'development' || env.NODE_ENV === 'test') {
     fastify.log.info(
       { email, devOtp: code },
-      '[Dev Mode] Skipping SMTP mail delivery. devOtp code generated and returned in response payload.'
+      '[Dev Mode] OTP code generated and dispatched via mail service.'
     );
   }
 
