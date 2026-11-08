@@ -5,6 +5,7 @@ coverage/
 .env
 .env.local
 .env.*.local
+pnpm-lock.yaml
 
 # Build output of the local database cleanup script
 scripts/clean-db.js
