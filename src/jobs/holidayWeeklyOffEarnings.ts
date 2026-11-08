@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { and, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, lte, sql } from 'drizzle-orm';
 import * as schema from '../db/schema.js';
 import { addDays, dayOfWeek, enumerateDates, toDateISO } from '../shared/utils/datetime.js';
 
@@ -89,11 +89,30 @@ export async function postHolidayAndWeeklyOffEarnings(
 
   const weeklyOffSet = new Set(weeklyOffRows.map((w) => `${w.employeeId}::${w.dayOfWeek}`));
 
+  const activeAssignments = await fastify.db
+    .select({
+      employeeId: schema.employeeShiftAssignments.employeeId,
+      createdAt: schema.employeeShiftAssignments.createdAt,
+    })
+    .from(schema.employeeShiftAssignments)
+    .where(eq(schema.employeeShiftAssignments.isActive, true))
+    .orderBy(asc(schema.employeeShiftAssignments.createdAt));
+
+  const empAssignmentStartDateMap = new Map<string, string>();
+  for (const a of activeAssignments) {
+    if (!empAssignmentStartDateMap.has(a.employeeId)) {
+      empAssignmentStartDateMap.set(a.employeeId, toDateISO(a.createdAt));
+    }
+  }
+
   const dates = enumerateDates(from, to);
   for (const date of dates) {
     const dow = dayOfWeek(date);
     for (const emp of employees) {
       if (!emp.premisesId) continue;
+
+      const assignmentStartDate = empAssignmentStartDateMap.get(emp.employeeId);
+      if (!assignmentStartDate || date < assignmentStartDate) continue;
 
       const holidayKey = `${emp.organizationId}::${emp.premisesId}::${date}`;
       const holiday = holidayByOrgPremisesDate.get(holidayKey);

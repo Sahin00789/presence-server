@@ -1,9 +1,9 @@
 import { FastifyInstance } from 'fastify';
-import { and, desc, eq, gte, inArray, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lte, or, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
 import { findStaffProfile, listOrganizationStaff } from '../../shared/services/staff.service.js';
-import { dayOfWeek, enumerateDates } from '../../shared/utils/datetime.js';
+import { dayOfWeek, enumerateDates, toDateISO } from '../../shared/utils/datetime.js';
 import { buildPdfReport, PdfTable } from '../../shared/utils/pdf.js';
 
 function getMonthDateRange(year: number, month: number) {
@@ -145,6 +145,23 @@ export async function generateDailyEarningLedgerEntries(
 
   if (!staff) return;
 
+  const [activeAssignment] = await fastify.db
+    .select({ createdAt: schema.employeeShiftAssignments.createdAt })
+    .from(schema.employeeShiftAssignments)
+    .where(
+      and(
+        eq(schema.employeeShiftAssignments.employeeId, staffProfileId),
+        eq(schema.employeeShiftAssignments.organizationId, organizationId),
+        eq(schema.employeeShiftAssignments.isActive, true)
+      )
+    )
+    .orderBy(asc(schema.employeeShiftAssignments.createdAt))
+    .limit(1);
+
+  if (!activeAssignment) return;
+
+  const assignmentStartDate = toDateISO(activeAssignment.createdAt);
+
   try {
     const salary = await getCurrentSalaryStructure(
       fastify,
@@ -240,6 +257,7 @@ export async function generateDailyEarningLedgerEntries(
       overtimeId?: string | null;
       sourceReference: string;
     }) => {
+      if (values.earningDate < assignmentStartDate) return;
       const attendanceKey = values.attendanceId ? `${values.attendanceId}:${values.type}` : null;
       if (values.overtimeId && seenOvertimeEntries.has(values.overtimeId)) return;
       if (seenSourceReferences.has(values.sourceReference)) return;

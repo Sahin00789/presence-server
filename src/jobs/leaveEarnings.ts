@@ -24,6 +24,7 @@ export async function postLeaveEarnings(
       endTime: schema.shifts.endTime,
       leavePay: schema.employeeShiftAssignments.leavePay,
       absentPay: schema.employeeShiftAssignments.absentPay,
+      createdAt: schema.employeeShiftAssignments.createdAt,
     })
     .from(schema.employeeShiftAssignments)
     .innerJoin(schema.shifts, eq(schema.employeeShiftAssignments.shiftId, schema.shifts.id))
@@ -33,6 +34,11 @@ export async function postLeaveEarnings(
 
   for (const date of dates) {
     for (const assignment of assignments) {
+      const assignmentStartDate = toDateISO(assignment.createdAt);
+      if (date < assignmentStartDate) {
+        continue;
+      }
+
       const shiftStartMins = parseTimeToMinutes(assignment.startTime);
       const shiftEndMins = parseTimeToMinutes(assignment.endTime);
       const isOvernight = shiftEndMins <= shiftStartMins;
