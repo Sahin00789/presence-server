@@ -700,20 +700,26 @@ type RefreshRotationOutcome =
 async function rotateRefreshToken(
   fastify: FastifyInstance,
   presentedToken: string,
-  deviceContext?: DeviceContext
+  deviceContext?: DeviceContext,
+  expectedDeviceId?: string
 ): Promise<RefreshRotationOutcome> {
   const presentedHash = hashRefreshToken(presentedToken, env.REFRESH_TOKEN_SECRET);
 
   return fastify.db.transaction(async (tx) => {
+    const conditions = [
+      or(
+        eq(schema.loggedDevices.refreshTokenHash, presentedHash),
+        eq(schema.loggedDevices.previousRefreshTokenHash, presentedHash)
+      ),
+    ];
+    if (expectedDeviceId) {
+      conditions.push(eq(schema.loggedDevices.id, expectedDeviceId));
+    }
+
     const [device] = await tx
       .select()
       .from(schema.loggedDevices)
-      .where(
-        or(
-          eq(schema.loggedDevices.refreshTokenHash, presentedHash),
-          eq(schema.loggedDevices.previousRefreshTokenHash, presentedHash)
-        )
-      )
+      .where(and(...conditions))
       .limit(1)
       .for('update');
 
@@ -725,14 +731,6 @@ async function rotateRefreshToken(
 
     if (!device.isActive) {
       return { status: 'inactive' } as const;
-    }
-
-    if (device.expiresAt.getTime() <= now.getTime()) {
-      await tx
-        .update(schema.loggedDevices)
-        .set({ isActive: false, revokedAt: now, revokedReason: 'EXPIRED' })
-        .where(eq(schema.loggedDevices.id, device.id));
-      return { status: 'expired' } as const;
     }
 
     const isReplay = device.previousRefreshTokenHash === presentedHash;
@@ -818,7 +816,8 @@ export async function processRefreshToken(
   const rotation = await rotateRefreshToken(
     fastify,
     presentedToken,
-    mergedDeviceContext
+    mergedDeviceContext,
+    input.loggedDeviceId
   );
 
   if (rotation.status === 'reuse') {
@@ -891,6 +890,7 @@ export async function processRefreshToken(
     accessToken,
     expiresIn: 900,
     refreshToken: rotation.refreshToken,
+    loggedDeviceId: rotation.deviceId,
     user: {
       id: rotation.userId,
       email: userRecord.email,
@@ -1150,8 +1150,9 @@ async function issueUserSession(
   );
   const now = new Date();
 
+  let insertedDeviceId: string | undefined;
   try {
-    await fastify.db.insert(schema.loggedDevices).values({
+    const [inserted] = await fastify.db.insert(schema.loggedDevices).values({
       userId: params.userId,
       sessionJti: jti,
       refreshTokenHash,
@@ -1163,7 +1164,8 @@ async function issueUserSession(
       userAgent: params.deviceInfo?.userAgent || null,
       isActive: true,
       lastActiveAt: now,
-    });
+    }).returning({ id: schema.loggedDevices.id });
+    insertedDeviceId = inserted?.id;
   } catch (err) {
     // Without this row every subsequent request fails SESSION_NOT_FOUND, so never
     // hand out tokens for a session that was not persisted.
@@ -1201,6 +1203,7 @@ async function issueUserSession(
     accessToken,
     expiresIn: 900,
     refreshToken,
+    loggedDeviceId: insertedDeviceId,
     user: {
       id: params.userId,
       email: params.email,

@@ -7,8 +7,10 @@ import { createHmac, randomBytes } from 'node:crypto';
  */
 export const REFRESH_TOKEN_PREFIX = 'rt_';
 
-/** Sliding lifetime of a refresh token: 3 months (90 days) from the last rotation. */
-export const REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60;
+/**
+ * Refresh token lifetime: Non-expiring (100 years), bound to logged device ID.
+ */
+export const REFRESH_TOKEN_TTL_SECONDS = 100 * 365 * 24 * 60 * 60;
 
 /**
  * When a rotation response is lost in transit the client retries with the token

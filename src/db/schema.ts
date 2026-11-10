@@ -131,7 +131,7 @@ export const loggedDevices = pgTable('logged_devices', {
   previousRotatedAt: timestamp('previous_rotated_at', { withTimezone: true }),
   expiresAt: timestamp('expires_at', { withTimezone: true })
     .notNull()
-    .default(sql`now() + interval '90 days'`),
+    .default(sql`now() + interval '100 years'`),
   deviceName: text('device_name'),
   deviceType: text('device_type'),
   osName: text('os_name'),

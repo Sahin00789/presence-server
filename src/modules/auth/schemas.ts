@@ -68,6 +68,7 @@ export const googleOwnerRegistrationSchema = z.object({
 
 export const refreshTokenSchema = z.object({
   refreshToken: z.string().min(16).max(512),
+  loggedDeviceId: z.string().optional(),
   deviceName: z.string().optional(),
   deviceType: z.string().optional(),
   osName: z.string().optional(),
@@ -104,6 +105,7 @@ export const authResponseSchema = z.object({
   accessToken: z.string(),
   expiresIn: z.number(),
   refreshToken: z.string(),
+  loggedDeviceId: z.string().optional(),
   user: authUserSchema,
 });
 
