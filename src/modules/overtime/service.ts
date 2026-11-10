@@ -48,13 +48,14 @@ export async function listOvertime(
   const rows = await fastify.db
     .select({
       overtime: schema.overtime,
-      staffName: schema.users.fullName,
+      userFullName: schema.users.fullName,
+      empName: schema.employees.name,
       staffEmail: schema.users.email,
       staffCode: schema.employees.employeeCode,
     })
     .from(schema.overtime)
     .innerJoin(schema.employees, eq(schema.employees.id, schema.overtime.employeeId))
-    .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
+    .leftJoin(schema.users, eq(schema.users.id, schema.employees.userId))
     .where(and(...conditions))
     .orderBy(desc(schema.overtime.workDate), desc(schema.overtime.createdAt));
 
@@ -72,9 +73,9 @@ export async function listOvertime(
     id: row.overtime.id,
     organizationId: row.overtime.organizationId,
     staffProfileId: row.overtime.employeeId,
-    staffName: row.staffName,
-    staffEmail: row.staffEmail,
-    staffCode: row.staffCode,
+    staffName: row.userFullName || row.empName || 'Staff Member',
+    staffEmail: row.staffEmail || '',
+    staffCode: row.staffCode || '',
     requestedBy: row.overtime.requestedBy,
     approvedBy: row.overtime.approvedBy,
     workDate: String(row.overtime.workDate),

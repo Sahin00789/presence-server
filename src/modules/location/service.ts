@@ -142,6 +142,16 @@ export async function getTodayLocationPresence(
     }
   });
 
+  const orgPremisesShifts = await fastify.db
+    .select()
+    .from(schema.shifts)
+    .where(
+      and(
+        eq(schema.shifts.organizationId, organizationId),
+        eq(schema.shifts.isActive, true)
+      )
+    );
+
   // 7. Build Staff Cards
   const staffCards = activeEmployees.map((emp) => {
     const att = attMap.get(emp.id);
@@ -153,7 +163,14 @@ export async function getTodayLocationPresence(
       getAssignedDayNumbers(a.shift.dayName).includes(targetDow)
     );
 
-    const shift = matchingAssignment?.shift ?? null;
+    const fallbackPremisesShift = !matchingAssignment && empAssignments.length === 0
+      ? orgPremisesShifts.find((s) =>
+          (!s.premisesId || s.premisesId === (selectedPremises?.id ?? emp.premisesId)) &&
+          getAssignedDayNumbers(s.dayName).includes(targetDow)
+        ) ?? null
+      : null;
+
+    const shift = matchingAssignment?.shift ?? fallbackPremisesShift;
     const assignment = matchingAssignment?.assignment ?? null;
     const empPings = att ? pingMap.get(att.id) || [] : [];
 

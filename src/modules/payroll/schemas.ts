@@ -112,16 +112,16 @@ export const unworkedPaymentRuleSchema = z.object({
 });
 
 export const createUnworkedPaymentRuleSchema = z.object({
-  employeeId: z.string().uuid().optional().nullable(),
-  premisesId: z.string().uuid().optional().nullable(),
+  employeeId: z.string().uuid().or(z.literal('')).nullish().transform((v) => (v ? v : null)),
+  premisesId: z.string().uuid().or(z.literal('')).nullish().transform((v) => (v ? v : null)),
   dayType: z.enum(['HOLIDAY', 'WEEKLY_OFF']),
   paymentInr: z.number().int().nonnegative().optional(),
   paymentCents: z.number().int().nonnegative().optional(),
 });
 
 export const unworkedRulesQuerySchema = z.object({
-  employeeId: z.string().uuid().optional(),
-  premisesId: z.string().uuid().optional(),
+  employeeId: z.string().uuid().or(z.literal('')).optional().transform((v) => (v ? v : undefined)),
+  premisesId: z.string().uuid().or(z.literal('')).optional().transform((v) => (v ? v : undefined)),
   onDate: z.string().optional(),
 });
 

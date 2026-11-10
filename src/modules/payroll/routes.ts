@@ -226,6 +226,7 @@ export async function payrollRoutes(fastify: FastifyInstance) {
         request.user,
         request.user.organizationId,
         q.employeeId,
+        q.premisesId,
         q.onDate
       );
       return reply.send(rules);
@@ -245,6 +246,7 @@ export async function payrollRoutes(fastify: FastifyInstance) {
         request.user,
         request.user.organizationId,
         q.employeeId,
+        q.premisesId,
         q.onDate
       );
       return reply.send(rules);

@@ -30,7 +30,7 @@ async function getUnworkedPaymentAmount(
 
   if (rule) {
     const amt = Number((rule as any).paymentInr ?? (rule as any).paymentPaise ?? 0);
-    if (amt > 0) return amt;
+    return amt;
   }
 
   const [assignment] = await fastify.db

@@ -344,24 +344,22 @@ export async function generateDailyEarningLedgerEntries(
       fallbackCents: number
     ) => {
       const candidates = unworkedRules
-        .filter(
-          (rule) =>
-            rule.dayType === dayType &&
-            rule.createdAt.toISOString().slice(0, 10) <= date
-        )
+        .filter((rule) => rule.dayType === dayType)
         .sort((a, b) => {
           const specificityA =
-            (a.employeeId === staffProfileId ? 2 : 0) +
+            (a.employeeId === staffProfileId ? 4 : 0) +
             (a.premisesId === premisesId ? 2 : 0);
           const specificityB =
-            (b.employeeId === staffProfileId ? 2 : 0) +
+            (b.employeeId === staffProfileId ? 4 : 0) +
             (b.premisesId === premisesId ? 2 : 0);
           if (specificityA !== specificityB) return specificityB - specificityA;
           return b.createdAt.getTime() - a.createdAt.getTime();
         });
       const rule = candidates[0];
       if (!rule) return fallbackCents;
-      if (Number(rule.paymentInr) > 0) return Number(rule.paymentInr);
+      if (rule.paymentInr !== null && rule.paymentInr !== undefined) {
+        return Math.round(Number(rule.paymentInr) * 100);
+      }
       if (rule.multiplierBasisPoints > 0) {
         return Math.round((fallbackCents * rule.multiplierBasisPoints) / 10000);
       }
@@ -1271,13 +1269,18 @@ export async function getUnworkedPaymentRules(
   user: { userId: string; role: 'OWNER' | 'EMPLOYEE' },
   organizationId: string,
   employeeId?: string,
+  premisesId?: string,
   onDate?: string
 ) {
-  let targetEmployeeId = employeeId;
+  let targetEmployeeId = employeeId?.trim() || undefined;
+  let targetPremisesId = premisesId?.trim() || undefined;
   if (user.role === 'EMPLOYEE') {
     const profile = await findStaffProfile(fastify, user.userId, organizationId);
     if (profile) {
       targetEmployeeId = profile.id;
+      if (!targetPremisesId && profile.premisesId) {
+        targetPremisesId = profile.premisesId;
+      }
     }
   }
 
@@ -1288,12 +1291,21 @@ export async function getUnworkedPaymentRules(
       sql`(${schema.unworkedPaymentRules.employeeId} = ${targetEmployeeId} OR ${schema.unworkedPaymentRules.employeeId} IS NULL)`
     );
   }
+  if (targetPremisesId) {
+    conditions.push(
+      sql`(${schema.unworkedPaymentRules.premisesId} = ${targetPremisesId} OR ${schema.unworkedPaymentRules.premisesId} IS NULL)`
+    );
+  }
 
   const rows = await fastify.db
     .select()
     .from(schema.unworkedPaymentRules)
     .where(and(...conditions))
-    .orderBy(desc(schema.unworkedPaymentRules.createdAt));
+    .orderBy(
+      sql`CASE WHEN ${schema.unworkedPaymentRules.employeeId} IS NOT NULL THEN 0 ELSE 1 END`,
+      sql`CASE WHEN ${schema.unworkedPaymentRules.premisesId} IS NOT NULL THEN 0 ELSE 1 END`,
+      desc(schema.unworkedPaymentRules.createdAt)
+    );
 
   return rows.map((r) => ({
     ...r,
@@ -1389,13 +1401,16 @@ export async function createUnworkedPaymentRule(
     multiplierBasisPoints?: number;
   }
 ) {
-  if (input.employeeId) {
+  const employeeId = input.employeeId?.trim() || null;
+  const premisesId = input.premisesId?.trim() || null;
+
+  if (employeeId) {
     const [profile] = await fastify.db
       .select({ id: schema.employees.id })
       .from(schema.employees)
       .where(
         and(
-          eq(schema.employees.id, input.employeeId),
+          eq(schema.employees.id, employeeId),
           eq(schema.employees.organizationId, organizationId)
         )
       )
@@ -1405,17 +1420,22 @@ export async function createUnworkedPaymentRule(
     }
   }
 
-  const paymentAmount = input.paymentInr ?? input.paymentCents ?? 0;
+  const paymentAmount = input.paymentInr ?? (input.paymentCents !== undefined ? Math.round(input.paymentCents / 100) : 0);
 
-  // Check for an existing rule for same organization, employee, and dayType
+  // Check for an existing rule for same organization, employee/premises, and dayType
   const existingConditions = [
     eq(schema.unworkedPaymentRules.organizationId, organizationId),
     eq(schema.unworkedPaymentRules.dayType, input.dayType),
   ];
-  if (input.employeeId) {
-    existingConditions.push(eq(schema.unworkedPaymentRules.employeeId, input.employeeId));
+  if (employeeId) {
+    existingConditions.push(eq(schema.unworkedPaymentRules.employeeId, employeeId));
   } else {
     existingConditions.push(sql`${schema.unworkedPaymentRules.employeeId} IS NULL`);
+    if (premisesId) {
+      existingConditions.push(eq(schema.unworkedPaymentRules.premisesId, premisesId));
+    } else {
+      existingConditions.push(sql`${schema.unworkedPaymentRules.premisesId} IS NULL`);
+    }
   }
 
   const [existing] = await fastify.db
@@ -1430,7 +1450,8 @@ export async function createUnworkedPaymentRule(
       .update(schema.unworkedPaymentRules)
       .set({
         paymentInr: paymentAmount,
-        premisesId: input.premisesId ?? existing.premisesId,
+        premisesId: premisesId ?? existing.premisesId,
+        createdAt: new Date(),
       })
       .where(eq(schema.unworkedPaymentRules.id, existing.id))
       .returning();
@@ -1440,13 +1461,42 @@ export async function createUnworkedPaymentRule(
       .insert(schema.unworkedPaymentRules)
       .values({
         organizationId,
-        premisesId: input.premisesId ?? null,
-        employeeId: input.employeeId ?? null,
+        premisesId: premisesId ?? null,
+        employeeId: employeeId ?? null,
         dayType: input.dayType,
         paymentInr: paymentAmount,
+        createdAt: new Date(),
       })
       .returning();
     resultRule = created;
+  }
+
+  // Update unlocked employee earning ledger entries for this rule's scope in the current open period
+  try {
+    const ledgerType = input.dayType === 'HOLIDAY' ? 'HOLIDAY' : 'OFF_DAY';
+    const currentDate = new Date().toISOString().slice(0, 10);
+    const currentMonthStart = currentDate.slice(0, 7) + '-01';
+
+    const ledgerConditions = [
+      eq(schema.employeeEarningLedger.organizationId, organizationId),
+      eq(schema.employeeEarningLedger.type, ledgerType),
+      gte(schema.employeeEarningLedger.earningDate, currentMonthStart),
+    ];
+    if (employeeId) {
+      ledgerConditions.push(eq(schema.employeeEarningLedger.employeeId, employeeId));
+    } else if (premisesId) {
+      ledgerConditions.push(eq(schema.employeeEarningLedger.premisesId, premisesId));
+    }
+
+    await fastify.db
+      .update(schema.employeeEarningLedger)
+      .set({
+        amount: String(paymentAmount),
+        updatedAt: new Date(),
+      })
+      .where(and(...ledgerConditions));
+  } catch (err) {
+    fastify.log.warn({ err }, 'Failed to backfill earning ledger after unworked rule update');
   }
 
   return {
