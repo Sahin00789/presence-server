@@ -64,6 +64,13 @@
       "when": 1794207127431,
       "tag": "0008_giant_karen_page",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1794207127432,
+      "tag": "0009_divide_location_pings",
+      "breakpoints": true
     }
   ]
 }

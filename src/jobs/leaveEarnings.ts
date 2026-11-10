@@ -192,34 +192,6 @@ export async function postLeaveEarnings(
   return { approvedLeavesProcessed, autoAbsentMarked };
 }
 
-export function startLeaveEarningsJob(fastify: FastifyInstance): void {
-  let timer: NodeJS.Timeout | null = null;
-  let running = false;
-
-  const run = async () => {
-    if (running) {
-      return;
-    }
-    running = true;
-    try {
-      await postLeaveEarnings(fastify);
-    } catch (error) {
-      fastify.log.error({ err: error }, 'Leave earnings job failed');
-    } finally {
-      running = false;
-    }
-  };
-
-  fastify.addHook('onListen', async () => {
-    setTimeout(run, 4000);
-    timer = setInterval(run, 5 * 60 * 1000);
-    timer.unref?.();
-  });
-
-  fastify.addHook('onClose', async () => {
-    if (timer) {
-      clearInterval(timer);
-      timer = null;
-    }
-  });
+export function startLeaveEarningsJob(_fastify: FastifyInstance): void {
+  // Background cron job disabled: employee self-service claim flow replaces automated cronjob.
 }

@@ -14,6 +14,21 @@ function getMonthDateRange(year: number, month: number) {
   return { startDate, nextMonthStartDate };
 }
 
+function toYmd(val: any): string {
+  if (!val) return '';
+  if (val instanceof Date) {
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, '0');
+    const d = String(val.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  const s = String(val).trim();
+  if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) {
+    return s.slice(0, 10);
+  }
+  return s;
+}
+
 /**
  * 1. Get monthly attendance statistics dynamically (calculated on-the-fly).
  */
@@ -173,7 +188,7 @@ export async function generateDailyEarningLedgerEntries(
     const dailyPresentCents = salary?.presentCents ?? 0;
     const fallbackDailyCents = Number(dailyPresentCents) > 0 ? Number(dailyPresentCents) : 0;
 
-    // Purge any unworked holiday or weekly off-day earnings outside [assignmentStartDate, currentDate]
+    // Purge any unworked holiday or weekly off-day earnings strictly in the future (after currentDate)
     const earningLedger = schema.employeeEarningLedger;
     await fastify.db
       .delete(earningLedger)
@@ -184,7 +199,7 @@ export async function generateDailyEarningLedgerEntries(
           gte(earningLedger.earningDate, startDate),
           sql`${earningLedger.earningDate} < ${nextMonthStartDate}`,
           inArray(earningLedger.type, ['HOLIDAY', 'OFF_DAY']),
-          sql`(${earningLedger.earningDate} < ${assignmentStartDate} OR ${earningLedger.earningDate} > ${currentDate})`
+          sql`${earningLedger.earningDate} > ${currentDate}`
         )
       );
 
@@ -272,7 +287,7 @@ export async function generateDailyEarningLedgerEntries(
       overtimeId?: string | null;
       sourceReference: string;
     }) => {
-      if (values.earningDate < assignmentStartDate || values.earningDate > currentDate) return;
+      if (values.earningDate > currentDate) return;
       const attendanceKey = values.attendanceId ? `${values.attendanceId}:${values.type}` : null;
       if (values.overtimeId && seenOvertimeEntries.has(values.overtimeId)) return;
       if (seenSourceReferences.has(values.sourceReference)) return;
@@ -295,7 +310,7 @@ export async function generateDailyEarningLedgerEntries(
 
     const workedDates = new Set<string>();
     for (const ev of attendanceEvents) {
-      const workDate = String(ev.workDate);
+      const workDate = toYmd(ev.workDate);
       if (ev.status === 'PRESENT' || ev.status === 'HALF_DAY') {
         workedDates.add(workDate);
       }
@@ -381,7 +396,7 @@ export async function generateDailyEarningLedgerEntries(
 
     const holidayDates = new Set<string>();
     for (const holiday of holidays) {
-      const holidayDate = String(holiday.date);
+      const holidayDate = toYmd(holiday.date);
       holidayDates.add(holidayDate);
       if (!holiday.isPaid || workedDates.has(holidayDate)) continue;
 
@@ -393,7 +408,7 @@ export async function generateDailyEarningLedgerEntries(
           holidayDate,
           dailyPresentCents || fallbackDailyCents
         ),
-        sourceReference: `holiday:${holiday.id}:HOLIDAY`,
+        sourceReference: `holiday:${holiday.id}:${staffProfileId}:${holidayDate}:HOLIDAY`,
       });
     }
 
@@ -431,7 +446,7 @@ export async function generateDailyEarningLedgerEntries(
     // Only create it when the day was not already paid as worked/holiday/off.
     for (const ev of attendanceEvents) {
       if (ev.status !== 'LEAVE') continue;
-      const workDate = String(ev.workDate);
+      const workDate = toYmd(ev.workDate);
       if (workedDates.has(workDate) || holidayDates.has(workDate)) continue;
       if (weeklyOffDays.has(dayOfWeek(workDate))) continue;
 
@@ -469,7 +484,7 @@ export async function generateDailyEarningLedgerEntries(
     for (const ot of overtimeRecords) {
       const otAmountCents = Number((ot as any).paymentCents ?? (ot as any).paymentInr ?? 0);
       queueEarning({
-        earningDate: ot.workDate,
+        earningDate: toYmd(ot.workDate),
         type: 'OVERTIME',
         amountCents: otAmountCents,
         overtimeId: ot.id,
@@ -570,7 +585,7 @@ async function reconcileMonthlyPayrollById(fastify: FastifyInstance, payrollId: 
     .where(
       and(
         eq(earningLedger.employeeId, payroll.employeeId),
-        eq(earningLedger.premisesId, payroll.premisesId),
+        eq(earningLedger.organizationId, payroll.organizationId),
         gte(earningLedger.earningDate, startDate),
         sql`${earningLedger.earningDate} < ${nextMonthStartDate}`
       )
@@ -654,7 +669,7 @@ export async function getDailyEarningLedger(
   const todayIso = new Date().toISOString().split('T')[0]!;
   const { startDate, nextMonthStartDate } = getMonthDateRange(year, month);
   const earningLedger = schema.employeeEarningLedger;
-  return await fastify.db
+  const rows = await fastify.db
     .select()
     .from(earningLedger)
     .where(
@@ -667,6 +682,11 @@ export async function getDailyEarningLedger(
       )
     )
     .orderBy(desc(earningLedger.earningDate));
+
+  return rows.map((r) => ({
+    ...r,
+    earningDate: toYmd(r.earningDate),
+  }));
 }
 
 /**
@@ -683,17 +703,17 @@ export async function getDailyEarningTotals(
   const grouped = new Map<string, typeof entries>();
 
   for (const entry of entries) {
-    const date = entry.earningDate;
-    const list = grouped.get(date) ?? [];
-    list.push(entry);
-    grouped.set(date, list);
+    const dateStr = toYmd(entry.earningDate);
+    const list = grouped.get(dateStr) ?? [];
+    list.push({ ...entry, earningDate: dateStr });
+    grouped.set(dateStr, list);
   }
 
   const totals = [];
-  for (const [date, list] of grouped.entries()) {
+  for (const [dateStr, list] of grouped.entries()) {
     const totalAmount = list.reduce((sum, e) => sum + Number(e.amount), 0);
     totals.push({
-      earningDate: date,
+      earningDate: dateStr,
       totalAmount: totalAmount.toFixed(2),
       entryCount: list.length,
       entries: list,
@@ -1574,7 +1594,7 @@ export async function getMyMonthlyEarningLedger(
     month,
     year,
     earnedAmount: r.earnedAmount ?? '0.00',
-    earnedPaise: Math.round(Number(r.earnedAmount ?? 0) * 100),
+    earnedPaise: Math.round(Number(r.earnedAmount ?? 0)),
     paidAmount: r.paidAmount ?? '0.00',
     dueAmount: r.dueAmount ?? '0.00',
     status: r.status ?? 'OPEN',
@@ -1595,21 +1615,22 @@ export async function getMyMonthlyEarningLedger(
     breakdown: r.breakdown ?? { earnings: [] },
     dailyTotals,
     entries: rawEntries.map((e: any) => {
-      const paise = Math.round((Number(e.amount) || 0) * 100);
+      const inr = Math.round(Number(e.amount) || 0);
       return {
         id: e.id,
         organizationId: e.organizationId,
         staffProfileId: e.employeeId,
         type: e.type,
-        amount: (paise / 100).toFixed(2),
-        amountPaise: paise,
+        amount: String(inr),
+        amountPaise: inr,
+        amountInr: inr,
         earningDate: e.earningDate,
         createdAt: e.createdAt,
       };
     }),
     payments: payments.map((p: any) => ({
       id: p.id,
-      amountPaise: Math.round(Number(p.amount) * 100),
+      amountPaise: Math.round(Number(p.amount) || 0),
       paymentDate: p.paymentDate,
       paymentMethod: p.paymentMethod,
       referenceNumber: p.reference,
@@ -1839,24 +1860,24 @@ export async function getMyOverallPayrollSummary(
   const totalPaidAmount = Number(payrollAgg?.totalPaid ?? 0);
   const totalDueAmount = Math.max(0, totalEarnedAmount - totalPaidAmount);
 
-  const totalEarnedPaise = Math.round(totalEarnedAmount * 100);
-  const totalPaidPaise = Math.round(totalPaidAmount * 100);
-  const totalDuePaise = Math.round(totalDueAmount * 100);
+  const totalEarnedInr = Math.round(totalEarnedAmount);
+  const totalPaidInr = Math.round(totalPaidAmount);
+  const totalDueInr = Math.max(0, totalEarnedInr - totalPaidInr);
 
   return {
     staffProfileId: profile.id,
     staffName: profile.name,
     staffCode: profile.employeeCode,
     premisesId: profile.premisesId,
-    totalEarnedAmount: totalEarnedAmount.toFixed(2),
-    totalEarnedPaise,
-    totalPaidAmount: totalPaidAmount.toFixed(2),
-    totalPaidPaise,
+    totalEarnedAmount: totalEarnedInr.toFixed(2),
+    totalEarnedPaise: totalEarnedInr,
+    totalPaidAmount: totalPaidInr.toFixed(2),
+    totalPaidPaise: totalPaidInr,
     totalDeductionAmount: "0.00",
     totalDeductionPaise: 0,
-    totalDueAmount: totalDueAmount.toFixed(2),
-    totalDuePaise,
-    totalBalancePaise: totalDuePaise,
+    totalDueAmount: totalDueInr.toFixed(2),
+    totalDuePaise: totalDueInr,
+    totalBalancePaise: totalDueInr,
   };
 }
 

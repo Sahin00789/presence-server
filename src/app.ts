@@ -22,9 +22,6 @@ import { biometricsRoutes } from './modules/biometrics/routes.js';
 import { leaveRoutes } from './modules/leave/routes.js';
 import { reportRoutes } from './modules/reports/routes.js';
 import { locationRoutes } from './modules/location/routes.js';
-import { startLeaveEarningsJob } from './jobs/leaveEarnings.js';
-import { startHolidayWeeklyOffEarningsJob } from './jobs/holidayWeeklyOffEarnings.js';
-import { startMonthlyReportMailerJob } from './jobs/monthlyReportMailer.js';
 import { AppError } from './shared/errors/app-error.js';
 
 export function buildApp() {
@@ -77,14 +74,6 @@ export function buildApp() {
   app.register(leaveRoutes);
   app.register(reportRoutes);
   app.register(locationRoutes);
-
-  // Background attendance finalization, leave earnings, holiday/weekly-off earnings, and monthly report mailer.
-  startLeaveEarningsJob(app);
-  startHolidayWeeklyOffEarningsJob(app);
-  startMonthlyReportMailerJob(app);
-
-  
-  
 
   // Global Root Endpoint
   app.get('/', async () => {

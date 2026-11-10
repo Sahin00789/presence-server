@@ -233,34 +233,6 @@ export async function postHolidayAndWeeklyOffEarnings(
   return { holidays, weeklyOffs };
 }
 
-export function startHolidayWeeklyOffEarningsJob(fastify: FastifyInstance): void {
-  let timer: NodeJS.Timeout | null = null;
-  let running = false;
-
-  const run = async () => {
-    if (running) {
-      return;
-    }
-    running = true;
-    try {
-      await postHolidayAndWeeklyOffEarnings(fastify);
-    } catch (error) {
-      fastify.log.error({ err: error }, 'Holiday/weekly-off earnings job failed');
-    } finally {
-      running = false;
-    }
-  };
-
-  fastify.addHook('onListen', async () => {
-    setTimeout(run, 2000);
-    timer = setInterval(run, 5 * 60 * 1000);
-    timer.unref?.();
-  });
-
-  fastify.addHook('onClose', async () => {
-    if (timer) {
-      clearInterval(timer);
-      timer = null;
-    }
-  });
+export function startHolidayWeeklyOffEarningsJob(_fastify: FastifyInstance): void {
+  // Background cron job disabled: employee self-service claim flow replaces automated cronjob.
 }

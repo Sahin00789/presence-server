@@ -202,7 +202,7 @@ export const unhandledEventItemSchema = z.object({
   amount: z.number(),
   currency: z.string().default('INR'),
   actionLabel: z.string(),
-  metadata: z.record(z.any()).optional(),
+  metadata: z.record(z.any()).optional().nullable(),
 });
 
 export const unhandledEventsResponseSchema = z.object({
@@ -213,17 +213,17 @@ export const unhandledEventsResponseSchema = z.object({
 export const claimUnhandledEventSchema = z.object({
   eventId: z.string(),
   type: unhandledEventTypeEnum,
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  metadata: z.record(z.any()).optional(),
+  date: z.string(),
+  metadata: z.record(z.any()).optional().nullable(),
 });
 
 export const claimUnhandledEventResponseSchema = z.object({
   success: z.boolean(),
   claimedEventId: z.string(),
   type: unhandledEventTypeEnum,
-  earnedAmount: z.number(),
+  earnedAmount: z.number().or(z.string().transform(Number)),
   remainingCount: z.number().int().nonnegative(),
-  message: z.string().optional(),
+  message: z.string().optional().nullable(),
 });
 
 
