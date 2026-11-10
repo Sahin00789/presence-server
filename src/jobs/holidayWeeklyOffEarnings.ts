@@ -3,7 +3,7 @@ import { and, asc, eq, gte, lte, sql } from 'drizzle-orm';
 import * as schema from '../db/schema.js';
 import { addDays, dayOfWeek, enumerateDates, toDateISO } from '../shared/utils/datetime.js';
 
-async function getUnworkedPaymentAmount(
+export async function getUnworkedPaymentAmount(
   fastify: FastifyInstance,
   organizationId: string,
   premisesId: string,

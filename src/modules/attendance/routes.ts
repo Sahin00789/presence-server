@@ -5,6 +5,8 @@ import {
   attendanceEventSchema,
   attendanceRecordSchema,
   attendanceRecordsQuerySchema,
+  claimUnhandledEventResponseSchema,
+  claimUnhandledEventSchema,
   clockInSchema,
   dailyAttendanceSchema,
   locationCheckResponseSchema,
@@ -12,8 +14,10 @@ import {
   manualMarkShiftSchema,
   overtimeLocationPingSchema,
   shiftLocationPingSchema,
+  unhandledEventsResponseSchema,
 } from './schemas.js';
 import {
+  claimUnhandledEvent,
   clockInOvertime,
   clockInShift,
   correctOvertimeAttendance,
@@ -23,6 +27,7 @@ import {
   getNextUpcomingAttendance,
   getOvertimeLocationPings,
   getShiftLocationPings,
+  getUnhandledEvents,
   getUpcomingAttendance,
   listAttendanceRecords,
   submitOvertimeLocationCheck,
@@ -283,6 +288,76 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
       const result = await getNextUpcomingAttendance(fastify, request.user.organizationId, request.user.userId);
       return reply.send(result as any);
     }
+  );
+
+  // 8. Unhandled Events Queue (Weekly off, Holiday, Approved Leave, Absent marking)
+  const unhandledEventsHandler = async (request: any, reply: any) => {
+    const result = await getUnhandledEvents(fastify, request.user.organizationId, request.user.userId);
+    return reply.send(result as any);
+  };
+
+  const unhandledEventsRouteSchema = {
+    description: 'Fetch pending unhandled attendance events (weekly offs, holidays, leaves, absents)',
+    tags: ['Attendance'],
+    response: {
+      200: unhandledEventsResponseSchema,
+    },
+  };
+
+  server.get(
+    '/api/v1/attendance/unhandled-events',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
+      schema: unhandledEventsRouteSchema,
+    },
+    unhandledEventsHandler
+  );
+
+  server.get(
+    '/api/v1/attendance/queue',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
+      schema: unhandledEventsRouteSchema,
+    },
+    unhandledEventsHandler
+  );
+
+  // 9. Claim Unhandled Event
+  const claimUnhandledEventHandler = async (request: any, reply: any) => {
+    const result = await claimUnhandledEvent(
+      fastify,
+      request.user.organizationId,
+      request.user.userId,
+      request.body as any
+    );
+    return reply.send(result as any);
+  };
+
+  const claimUnhandledEventRouteSchema = {
+    description: 'Claim/confirm a pending unhandled attendance event and credit earning/record attendance',
+    tags: ['Attendance'],
+    body: claimUnhandledEventSchema,
+    response: {
+      200: claimUnhandledEventResponseSchema,
+    },
+  };
+
+  server.post(
+    '/api/v1/attendance/unhandled-events/claim',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
+      schema: claimUnhandledEventRouteSchema,
+    },
+    claimUnhandledEventHandler
+  );
+
+  server.post(
+    '/api/v1/attendance/claim',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
+      schema: claimUnhandledEventRouteSchema,
+    },
+    claimUnhandledEventHandler
   );
 
   // Shift Location Ping Handler

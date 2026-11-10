@@ -12,6 +12,7 @@ import {
 
 import {
   addDays,
+  dayOfWeek,
   enumerateDates,
   isOvernightShift,
   minutesBetween,
@@ -19,6 +20,7 @@ import {
   resolveShiftWindow,
   toDateISOInTimeZone,
 } from '../../shared/utils/datetime.js';
+import { getUnworkedPaymentAmount } from '../../jobs/holidayWeeklyOffEarnings.js';
 import { buildSchedule, getAssignedDayNumbers, resolveTimezone } from '../shifts/service.js';
 
 import {
@@ -1885,43 +1887,16 @@ export async function correctOvertimeAttendance(
     attendanceEventId?: string;
     employeeId?: string;
     workDate?: string;
-    action: 'ABSENT' | 'HALF_DAY' | 'PRESENT' | 'DELETE_OVERTIME' | 'CANCELLED';
+    action: 'DELETE_OVERTIME' | 'CANCELLED' | 'CANCEL_OVERTIME';
     reason?: string;
     departureTime?: string;
   }
 ) {
-  if (input.action === 'DELETE_OVERTIME' || input.action === 'CANCELLED') {
-    const otId = input.overtimeId;
-    if (!otId) {
-      throw new AppError('overtimeId required to delete/cancel overtime', 400, 'OVERTIME_ID_REQUIRED');
-    }
-    const [ot] = await fastify.db
-      .select()
-      .from(schema.overtime)
-      .where(
-        and(
-          eq(schema.overtime.id, otId),
-          eq(schema.overtime.organizationId, organizationId)
-        )
-      )
-      .limit(1);
+  let otId = input.overtimeId;
 
-    if (!ot) {
-      throw new AppError('Overtime entry not found', 404, 'OVERTIME_NOT_FOUND');
-    }
-
-    await fastify.db
-      .update(schema.overtime)
-      .set({ status: 'CANCELLED', resolvedAt: new Date(), updatedAt: new Date() })
-      .where(eq(schema.overtime.id, otId));
-
-    return { deleted: true, overtimeId: otId, status: 'CANCELLED' };
-  }
-
-  let event: any = null;
-  if (input.attendanceEventId) {
-    const [row] = await fastify.db
-      .select()
+  if (!otId && input.attendanceEventId) {
+    const [att] = await fastify.db
+      .select({ overtimeId: schema.employeeOvertimeAttendance.overtimeId })
       .from(schema.employeeOvertimeAttendance)
       .where(
         and(
@@ -1930,47 +1905,78 @@ export async function correctOvertimeAttendance(
         )
       )
       .limit(1);
-    event = row ?? null;
-  } else if (input.overtimeId) {
-    const [row] = await fastify.db
-      .select()
-      .from(schema.employeeOvertimeAttendance)
+    if (att) {
+      otId = att.overtimeId;
+    }
+  } else if (!otId && input.employeeId && input.workDate) {
+    const [ot] = await fastify.db
+      .select({ id: schema.overtime.id })
+      .from(schema.overtime)
       .where(
         and(
-          eq(schema.employeeOvertimeAttendance.overtimeId, input.overtimeId),
-          eq(schema.employeeOvertimeAttendance.organizationId, organizationId)
+          eq(schema.overtime.organizationId, organizationId),
+          eq(schema.overtime.employeeId, input.employeeId),
+          eq(schema.overtime.workDate, input.workDate)
         )
       )
       .limit(1);
-    event = row ?? null;
+    if (ot) {
+      otId = ot.id;
+    }
   }
 
-  if (!event) {
-    throw new AppError('Overtime attendance record not found', 404, 'ATTENDANCE_EVENT_NOT_FOUND');
+  if (!otId) {
+    throw new AppError('overtimeId required to delete/cancel overtime', 400, 'OVERTIME_ID_REQUIRED');
   }
 
-  const updateFields: any = {
-    status: input.action === 'PRESENT' ? 'PRESENT' : input.action,
-    updatedAt: new Date(),
-    statusUpdatedBy: actorUserId,
-    correctionReason: input.reason ?? null,
-    correctedAt: new Date(),
-  };
+  const [ot] = await fastify.db
+    .select()
+    .from(schema.overtime)
+    .where(
+      and(
+        eq(schema.overtime.id, otId),
+        eq(schema.overtime.organizationId, organizationId)
+      )
+    )
+    .limit(1);
 
-  if (input.departureTime) {
-    const dateStr = String(event.workDate);
-    const departureIso = new Date(`${dateStr}T${input.departureTime}`).toISOString();
-    updateFields.clockOutAt = departureIso;
-    updateFields.clockOut = new Date(departureIso);
+  if (!ot) {
+    throw new AppError('Overtime entry not found', 404, 'OVERTIME_NOT_FOUND');
   }
 
-  const [updated] = await fastify.db
-    .update(schema.employeeAttendance)
-    .set(updateFields)
-    .where(eq(schema.employeeAttendance.id, event.id))
-    .returning();
+  const now = new Date();
+  await fastify.db
+    .update(schema.overtime)
+    .set({
+      status: 'CANCELLED',
+      reason: input.reason ?? ot.reason,
+      resolvedAt: now,
+      updatedAt: now,
+    })
+    .where(eq(schema.overtime.id, otId));
 
-  return toPublicAttendanceEvent(updated);
+  // If there is an overtime attendance record, record the correction
+  await fastify.db
+    .update(schema.employeeOvertimeAttendance)
+    .set({
+      correctionReason: input.reason ?? null,
+      correctedAt: now,
+      statusUpdatedBy: actorUserId,
+      updatedAt: now,
+    })
+    .where(eq(schema.employeeOvertimeAttendance.overtimeId, otId));
+
+  // If earning ledger record exists for this overtime, remove it
+  await fastify.db
+    .delete(schema.employeeEarningLedger)
+    .where(
+      and(
+        eq(schema.employeeEarningLedger.overtimeId, otId),
+        eq(schema.employeeEarningLedger.type, 'OVERTIME')
+      )
+    );
+
+  return { deleted: true, overtimeId: otId, status: 'CANCELLED' };
 }
 
 const MAX_ACCURACY = 30;
@@ -2277,3 +2283,511 @@ export async function getOvertimeLocationPings(
 }
 
 export { enumerateDates };
+
+export async function getUnhandledEvents(
+  fastify: FastifyInstance,
+  organizationId: string,
+  userId: string
+) {
+  const profile = await findStaffProfile(fastify, userId, organizationId);
+  if (!profile || !profile.premisesId) {
+    return { events: [], totalPending: 0 };
+  }
+
+  const timezone = await resolveTimezone(fastify, organizationId);
+  const now = new Date();
+  const today = toDateISOInTimeZone(now, timezone);
+  const from = addDays(today, -14);
+
+  // 1. Shift assignments for this employee
+  const assignments = await fastify.db
+    .select({
+      assignmentId: schema.employeeShiftAssignments.id,
+      shiftId: schema.employeeShiftAssignments.shiftId,
+      presentPay: schema.employeeShiftAssignments.presentPay,
+      halfDayPay: schema.employeeShiftAssignments.halfDayPay,
+      leavePay: schema.employeeShiftAssignments.leavePay,
+      absentPay: schema.employeeShiftAssignments.absentPay,
+      createdAt: schema.employeeShiftAssignments.createdAt,
+      shiftName: schema.shifts.shiftName,
+      startTime: schema.shifts.startTime,
+      endTime: schema.shifts.endTime,
+      dayName: schema.shifts.dayName,
+    })
+    .from(schema.employeeShiftAssignments)
+    .innerJoin(schema.shifts, eq(schema.shifts.id, schema.employeeShiftAssignments.shiftId))
+    .where(
+      and(
+        eq(schema.employeeShiftAssignments.employeeId, profile.id),
+        eq(schema.employeeShiftAssignments.organizationId, organizationId),
+        eq(schema.employeeShiftAssignments.isActive, true)
+      )
+    );
+
+  const employeeStartDate = profile.createdAt ? toDateISOInTimeZone(profile.createdAt, timezone) : from;
+
+  // 2. Existing earnings in ledger for this employee
+  const existingEarnings = await fastify.db
+    .select({
+      id: schema.employeeEarningLedger.id,
+      earningDate: schema.employeeEarningLedger.earningDate,
+      type: schema.employeeEarningLedger.type,
+      amount: schema.employeeEarningLedger.amount,
+      sourceReference: schema.employeeEarningLedger.sourceReference,
+    })
+    .from(schema.employeeEarningLedger)
+    .where(
+      and(
+        eq(schema.employeeEarningLedger.employeeId, profile.id),
+        gte(schema.employeeEarningLedger.earningDate, from),
+        lte(schema.employeeEarningLedger.earningDate, today)
+      )
+    );
+
+  const holidayEarnedDates = new Set(
+    existingEarnings.filter((e) => e.type === 'HOLIDAY').map((e) => String(e.earningDate))
+  );
+  const offDayEarnedDates = new Set(
+    existingEarnings.filter((e) => e.type === 'OFF_DAY').map((e) => String(e.earningDate))
+  );
+  const shiftEarnedRefs = new Set(
+    existingEarnings.filter((e) => e.type === 'SHIFT').map((e) => e.sourceReference ?? '')
+  );
+
+  // 3. Existing attendance records
+  const attendanceRecords = await fastify.db
+    .select()
+    .from(schema.employeeAttendance)
+    .where(
+      and(
+        eq(schema.employeeAttendance.employeeId, profile.id),
+        gte(schema.employeeAttendance.workDate, from),
+        lte(schema.employeeAttendance.workDate, today)
+      )
+    );
+
+  const workedDates = new Set(
+    attendanceRecords
+      .filter((r) => r.status === 'PRESENT' || r.status === 'HALF_DAY')
+      .map((r) => String(r.workDate))
+  );
+  const attendanceByAssignmentAndDate = new Map(
+    attendanceRecords.map((r) => [`${r.shiftAssignmentId}::${String(r.workDate)}`, r])
+  );
+
+  // 4. Holidays for premises
+  const holidays = await fastify.db
+    .select()
+    .from(schema.holidayCalendars)
+    .where(
+      and(
+        eq(schema.holidayCalendars.organizationId, organizationId),
+        eq(schema.holidayCalendars.premisesId, profile.premisesId),
+        gte(schema.holidayCalendars.date, from),
+        lte(schema.holidayCalendars.date, today)
+      )
+    );
+  const holidayByDate = new Map(holidays.map((h) => [String(h.date), h]));
+
+  // 5. Weekly offs for employee
+  const weeklyOffRows = await fastify.db
+    .select({ dayOfWeek: schema.weeklyOffs.dayOfWeek })
+    .from(schema.weeklyOffs)
+    .where(eq(schema.weeklyOffs.employeeId, profile.id));
+  const weeklyOffDows = new Set(weeklyOffRows.map((w) => w.dayOfWeek));
+
+  // 6. Approved leave requests
+  const approvedLeaves = await fastify.db
+    .select()
+    .from(schema.leaveRequests)
+    .where(
+      and(
+        eq(schema.leaveRequests.employeeId, profile.id),
+        eq(schema.leaveRequests.status, 'APPROVED'),
+        gte(schema.leaveRequests.workDate, from),
+        lte(schema.leaveRequests.workDate, today)
+      )
+    );
+  const leaveByAssignmentAndDate = new Map(
+    approvedLeaves.map((l) => [`${l.shiftAssignmentId}::${String(l.workDate)}`, l])
+  );
+
+  const assignedDowSet = new Set<number>();
+  for (const a of assignments) {
+    for (const d of getAssignedDayNumbers(a.dayName)) {
+      assignedDowSet.add(d);
+    }
+  }
+
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const dates = enumerateDates(from, today);
+  const events: any[] = [];
+
+  for (const date of dates) {
+    if (date < employeeStartDate) continue;
+    const dow = dayOfWeek(date);
+
+    // A. Check Holiday
+    const holiday = holidayByDate.get(date);
+    if (holiday && holiday.isPaid !== false) {
+      if (!holidayEarnedDates.has(date) && !workedDates.has(date)) {
+        const amt = await getUnworkedPaymentAmount(
+          fastify,
+          organizationId,
+          profile.premisesId,
+          profile.id,
+          'HOLIDAY'
+        );
+        events.push({
+          id: `holiday:${holiday.id}:${date}`,
+          type: 'HOLIDAY',
+          date,
+          title: `Holiday: ${holiday.name}`,
+          subtitle: `Paid holiday on ${dayNames[dow]}, ${date}`,
+          amount: amt,
+          currency: 'INR',
+          actionLabel: `Claim Holiday (₹${amt})`,
+          metadata: {
+            holidayId: holiday.id,
+            holidayName: holiday.name,
+          },
+        });
+        continue;
+      }
+    }
+
+    // B. Check Weekly Off
+    if (weeklyOffDows.has(dow) && !assignedDowSet.has(dow) && !workedDates.has(date)) {
+      if (!offDayEarnedDates.has(date)) {
+        const amt = await getUnworkedPaymentAmount(
+          fastify,
+          organizationId,
+          profile.premisesId,
+          profile.id,
+          'WEEKLY_OFF'
+        );
+        events.push({
+          id: `weekly_off:${profile.id}:${date}`,
+          type: 'WEEKLY_OFF',
+          date,
+          title: 'Weekly Off',
+          subtitle: `Scheduled rest day (${dayNames[dow]}, ${date})`,
+          amount: amt,
+          currency: 'INR',
+          actionLabel: `Claim Weekly Off (₹${amt})`,
+          metadata: {
+            dayOfWeek: dow,
+            dayName: dayNames[dow],
+          },
+        });
+        continue;
+      }
+    }
+
+    // C. Check Shifts & Leaves on this date
+    for (const assignment of assignments) {
+      const assignmentStartDate = toDateISOInTimeZone(assignment.createdAt, timezone);
+      if (date < assignmentStartDate) continue;
+
+      const appliesToDow = getAssignedDayNumbers(assignment.dayName).includes(dow);
+      if (!appliesToDow) continue;
+
+      const leave = leaveByAssignmentAndDate.get(`${assignment.assignmentId}::${date}`);
+      if (leave) {
+        const att = attendanceByAssignmentAndDate.get(`${assignment.assignmentId}::${date}`);
+        const leavePay = Number(assignment.leavePay ?? 0);
+        const alreadyCredited =
+          att?.status === 'LEAVE' &&
+          (leavePay === 0 || shiftEarnedRefs.has(`leave:${leave.id}`));
+        if (!alreadyCredited) {
+          events.push({
+            id: `leave:${leave.id}:${date}`,
+            type: 'LEAVE',
+            date,
+            title: 'Approved Leave',
+            subtitle: `Leave: ${leave.reason} (${date})`,
+            amount: leavePay,
+            currency: 'INR',
+            actionLabel: leavePay > 0 ? `Confirm Leave (₹${leavePay})` : 'Confirm Leave',
+            metadata: {
+              leaveRequestId: leave.id,
+              shiftAssignmentId: assignment.assignmentId,
+              reason: leave.reason,
+            },
+          });
+        }
+        continue;
+      }
+
+      const shiftWindow = resolveShiftWindow(
+        date,
+        assignment.startTime,
+        assignment.endTime,
+        0,
+        timezone
+      );
+
+      if (now.getTime() >= shiftWindow.endAt.getTime()) {
+        const att = attendanceByAssignmentAndDate.get(`${assignment.assignmentId}::${date}`);
+        const clockedIn = att?.clockInAt !== null || ['PRESENT', 'HALF_DAY'].includes(att?.status ?? '');
+        if (!clockedIn) {
+          const absentPay = Number(assignment.absentPay ?? 0);
+          const alreadyAcknowledged =
+            att?.status === 'ABSENT' &&
+            (absentPay === 0 || shiftEarnedRefs.has(`absent:${att?.id}`) || att?.remarks?.includes('acknowledged'));
+
+          if (!alreadyAcknowledged) {
+            events.push({
+              id: `absent:${assignment.assignmentId}:${date}`,
+              type: 'ABSENT',
+              date,
+              title: 'Missed Shift',
+              subtitle: `Shift ended without clock-in (${assignment.startTime.slice(0, 5)} - ${assignment.endTime.slice(0, 5)})`,
+              amount: absentPay,
+              currency: 'INR',
+              actionLabel: absentPay !== 0 ? `Acknowledge Absent (₹${absentPay})` : 'Acknowledge Absent',
+              metadata: {
+                shiftAssignmentId: assignment.assignmentId,
+                startTime: assignment.startTime,
+                endTime: assignment.endTime,
+                shiftName: assignment.shiftName || 'Shift',
+              },
+            });
+          }
+        }
+      }
+    }
+  }
+
+  events.sort((a, b) => a.date.localeCompare(b.date));
+
+  return {
+    events,
+    totalPending: events.length,
+  };
+}
+
+export async function claimUnhandledEvent(
+  fastify: FastifyInstance,
+  organizationId: string,
+  userId: string,
+  body: {
+    eventId: string;
+    type: 'WEEKLY_OFF' | 'HOLIDAY' | 'LEAVE' | 'ABSENT';
+    date: string;
+    metadata?: Record<string, any>;
+  }
+) {
+  const profile = await findStaffProfile(fastify, userId, organizationId);
+  if (!profile || !profile.premisesId) {
+    throw new AppError('Staff profile not found', 404, 'STAFF_NOT_FOUND');
+  }
+
+  let earnedAmount = 0;
+
+  if (body.type === 'WEEKLY_OFF') {
+    earnedAmount = await getUnworkedPaymentAmount(
+      fastify,
+      organizationId,
+      profile.premisesId,
+      profile.id,
+      'WEEKLY_OFF'
+    );
+    if (earnedAmount > 0) {
+      await fastify.db
+        .insert(schema.employeeEarningLedger)
+        .values({
+          organizationId,
+          premisesId: profile.premisesId,
+          employeeId: profile.id,
+          earningDate: body.date,
+          type: 'OFF_DAY',
+          amount: String(earnedAmount),
+          sourceReference: `weekly-off:${profile.id}:${body.date}:OFF_DAY`,
+        } as any)
+        .onConflictDoNothing();
+    }
+  } else if (body.type === 'HOLIDAY') {
+    earnedAmount = await getUnworkedPaymentAmount(
+      fastify,
+      organizationId,
+      profile.premisesId,
+      profile.id,
+      'HOLIDAY'
+    );
+    const holidayId = body.metadata?.holidayId ?? 'holiday';
+    if (earnedAmount > 0) {
+      await fastify.db
+        .insert(schema.employeeEarningLedger)
+        .values({
+          organizationId,
+          premisesId: profile.premisesId,
+          employeeId: profile.id,
+          earningDate: body.date,
+          type: 'HOLIDAY',
+          amount: String(earnedAmount),
+          sourceReference: `holiday:${holidayId}:${profile.id}:HOLIDAY`,
+        } as any)
+        .onConflictDoNothing();
+    }
+  } else if (body.type === 'LEAVE') {
+    const shiftAssignmentId = body.metadata?.shiftAssignmentId;
+    const leaveRequestId = body.metadata?.leaveRequestId;
+    const reason = body.metadata?.reason ?? 'Approved Leave';
+
+    const [existingAtt] = await fastify.db
+      .select()
+      .from(schema.employeeAttendance)
+      .where(
+        and(
+          eq(schema.employeeAttendance.employeeId, profile.id),
+          eq(schema.employeeAttendance.shiftAssignmentId, shiftAssignmentId),
+          eq(schema.employeeAttendance.workDate, body.date)
+        )
+      )
+      .limit(1);
+
+    let attId = existingAtt?.id;
+    if (!existingAtt) {
+      const [inserted] = await fastify.db
+        .insert(schema.employeeAttendance)
+        .values({
+          organizationId,
+          premisesId: profile.premisesId,
+          employeeId: profile.id,
+          shiftAssignmentId,
+          workDate: body.date,
+          status: 'LEAVE',
+          remarks: `Leave confirmed by employee: ${reason}`,
+        })
+        .returning();
+      attId = inserted.id;
+    } else {
+      await fastify.db
+        .update(schema.employeeAttendance)
+        .set({
+          status: 'LEAVE',
+          remarks: `Leave confirmed by employee: ${reason}`,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.employeeAttendance.id, existingAtt.id));
+    }
+
+    const [assignment] = await fastify.db
+      .select({ leavePay: schema.employeeShiftAssignments.leavePay })
+      .from(schema.employeeShiftAssignments)
+      .where(eq(schema.employeeShiftAssignments.id, shiftAssignmentId))
+      .limit(1);
+
+    earnedAmount = Number(assignment?.leavePay ?? 0);
+    if (earnedAmount > 0) {
+      await fastify.db
+        .insert(schema.employeeEarningLedger)
+        .values({
+          organizationId,
+          premisesId: profile.premisesId,
+          employeeId: profile.id,
+          earningDate: body.date,
+          type: 'SHIFT',
+          amount: String(earnedAmount),
+          shiftAssignmentId,
+          attendanceId: attId ?? null,
+          sourceReference: `leave:${leaveRequestId ?? attId}`,
+        } as any)
+        .onConflictDoNothing();
+    }
+  } else if (body.type === 'ABSENT') {
+    const shiftAssignmentId = body.metadata?.shiftAssignmentId;
+
+    const [existingAtt] = await fastify.db
+      .select()
+      .from(schema.employeeAttendance)
+      .where(
+        and(
+          eq(schema.employeeAttendance.employeeId, profile.id),
+          eq(schema.employeeAttendance.shiftAssignmentId, shiftAssignmentId),
+          eq(schema.employeeAttendance.workDate, body.date)
+        )
+      )
+      .limit(1);
+
+    let attId = existingAtt?.id;
+    if (!existingAtt) {
+      const [inserted] = await fastify.db
+        .insert(schema.employeeAttendance)
+        .values({
+          organizationId,
+          premisesId: profile.premisesId,
+          employeeId: profile.id,
+          shiftAssignmentId,
+          workDate: body.date,
+          status: 'ABSENT',
+          remarks: 'Missed shift acknowledged by employee',
+        })
+        .returning();
+      attId = inserted.id;
+    } else {
+      await fastify.db
+        .update(schema.employeeAttendance)
+        .set({
+          status: 'ABSENT',
+          remarks: 'Missed shift acknowledged by employee',
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.employeeAttendance.id, existingAtt.id));
+    }
+
+    const [assignment] = await fastify.db
+      .select({ absentPay: schema.employeeShiftAssignments.absentPay })
+      .from(schema.employeeShiftAssignments)
+      .where(eq(schema.employeeShiftAssignments.id, shiftAssignmentId))
+      .limit(1);
+
+    earnedAmount = Number(assignment?.absentPay ?? 0);
+    if (earnedAmount !== 0) {
+      await fastify.db
+        .insert(schema.employeeEarningLedger)
+        .values({
+          organizationId,
+          premisesId: profile.premisesId,
+          employeeId: profile.id,
+          earningDate: body.date,
+          type: 'SHIFT',
+          amount: String(earnedAmount),
+          shiftAssignmentId,
+          attendanceId: attId ?? null,
+          sourceReference: `absent:${attId}`,
+        } as any)
+        .onConflictDoNothing();
+    }
+  }
+
+  // Publish domain event for real-time WebSocket sync
+  try {
+    await (fastify as any).publishDomainEvent?.({
+      type: 'attendance_update',
+      organizationId,
+      premisesId: profile.premisesId,
+      userIds: [userId],
+      payload: {
+        staffProfileId: profile.id,
+        eventType: body.type,
+        date: body.date,
+        earnedAmount,
+      },
+    });
+  } catch (err) {
+    fastify.log.warn({ err }, 'Failed to publish domain event for claimed unhandled event');
+  }
+
+  const remaining = await getUnhandledEvents(fastify, organizationId, userId);
+
+  return {
+    success: true,
+    claimedEventId: body.eventId,
+    type: body.type,
+    earnedAmount,
+    remainingCount: remaining.totalPending,
+    message: `Successfully processed ${body.type.toLowerCase().replace('_', ' ')} for ${body.date}`,
+  };
+}

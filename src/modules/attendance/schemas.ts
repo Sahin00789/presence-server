@@ -148,7 +148,7 @@ export const manualMarkOvertimeSchema = z.object({
   attendanceEventId: z.string().uuid().optional(),
   employeeId: z.string().uuid().optional(),
   workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  action: z.enum(['ABSENT', 'HALF_DAY', 'PRESENT', 'DELETE_OVERTIME', 'CANCELLED']),
+  action: z.enum(['DELETE_OVERTIME', 'CANCELLED', 'CANCEL_OVERTIME']),
   reason: z.string().min(2).max(500).optional(),
   departureTime: z.string().optional(),
 });
@@ -189,6 +189,41 @@ export const locationCheckResponseSchema = z.object({
   result: z.enum(['IN_PREMISES', 'OUTSIDE', 'STALE', 'LOW_ACCURACY', 'MOCKED', 'UNKNOWN']),
   consecutiveFailures: z.number().int().nonnegative(),
   exceptionCreated: z.boolean(),
+});
+
+export const unhandledEventTypeEnum = z.enum(['WEEKLY_OFF', 'HOLIDAY', 'LEAVE', 'ABSENT']);
+
+export const unhandledEventItemSchema = z.object({
+  id: z.string(),
+  type: unhandledEventTypeEnum,
+  date: z.string(),
+  title: z.string(),
+  subtitle: z.string(),
+  amount: z.number(),
+  currency: z.string().default('INR'),
+  actionLabel: z.string(),
+  metadata: z.record(z.any()).optional(),
+});
+
+export const unhandledEventsResponseSchema = z.object({
+  events: z.array(unhandledEventItemSchema),
+  totalPending: z.number().int().nonnegative(),
+});
+
+export const claimUnhandledEventSchema = z.object({
+  eventId: z.string(),
+  type: unhandledEventTypeEnum,
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  metadata: z.record(z.any()).optional(),
+});
+
+export const claimUnhandledEventResponseSchema = z.object({
+  success: z.boolean(),
+  claimedEventId: z.string(),
+  type: unhandledEventTypeEnum,
+  earnedAmount: z.number(),
+  remainingCount: z.number().int().nonnegative(),
+  message: z.string().optional(),
 });
 
 
