@@ -2,19 +2,23 @@ import { FastifyInstance } from 'fastify';
 import { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 import {
+  createUnworkedPaymentRuleSchema,
   downloadPayslipQuerySchema,
   monthYearQuerySchema,
   myMonthlyEarningLedgerQuerySchema,
   recordTransactionSchema,
   transactionsQuerySchema,
+  unworkedRulesQuerySchema,
   updateTransactionSchema,
 } from './schemas.js';
 import {
+  createUnworkedPaymentRule,
   deletePayrollTransaction,
   downloadPayslipPdf,
   getMyMonthlyEarningLedger,
   getMyOverallPayrollSummary,
   getOrGenerateMonthlyPayroll,
+  getUnworkedPaymentRules,
   listMonthlyPayrollSummaries,
   listPayrollTransactions,
   recordPayrollTransaction,
@@ -208,4 +212,70 @@ export async function payrollRoutes(fastify: FastifyInstance) {
       return reply.send({ success: true });
     }
   );
+
+  // 8. Unworked Payment Rules GET & POST
+  const handleGetUnworkedRules = async (request: any, reply: any) => {
+    const q = request.query as z.infer<typeof unworkedRulesQuerySchema>;
+    let targetEmployeeId = q.employeeId;
+    if (request.user.role === 'EMPLOYEE') {
+      const profile = await findStaffProfile(fastify, request.user.userId, request.user.organizationId);
+      if (profile) {
+        targetEmployeeId = profile.id;
+      }
+    }
+    const rules = await getUnworkedPaymentRules(
+      fastify,
+      request.user.organizationId,
+      targetEmployeeId,
+      q.onDate
+    );
+    return reply.send(rules);
+  };
+
+  const handlePostUnworkedRule = async (request: any, reply: any) => {
+    const body = request.body as z.infer<typeof createUnworkedPaymentRuleSchema>;
+    const created = await createUnworkedPaymentRule(
+      fastify,
+      request.user.organizationId,
+      body
+    );
+    return reply.send(created);
+  };
+
+  server.get(
+    '/api/v1/salary/unworked-rules',
+    {
+      preHandler: [fastify.authenticate],
+      schema: { querystring: unworkedRulesQuerySchema },
+    },
+    handleGetUnworkedRules
+  );
+
+  server.get(
+    '/api/v1/payroll/unworked-rules',
+    {
+      preHandler: [fastify.authenticate],
+      schema: { querystring: unworkedRulesQuerySchema },
+    },
+    handleGetUnworkedRules
+  );
+
+  server.post(
+    '/api/v1/salary/unworked-rules',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: { body: createUnworkedPaymentRuleSchema },
+    },
+    handlePostUnworkedRule
+  );
+
+  server.post(
+    '/api/v1/payroll/unworked-rules',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: { body: createUnworkedPaymentRuleSchema },
+    },
+    handlePostUnworkedRule
+  );
 }
+

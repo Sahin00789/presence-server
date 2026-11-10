@@ -111,11 +111,10 @@ export async function processMonthlyReports(
         const staffTable: ReportTable = {
           title: `Monthly Attendance & Earnings Statement (${emp.fullName})`,
           subtitle: `Employee Code: ${emp.employeeCode} | Period: ${startDate} to ${endDate}`,
-          columns: ['Work Date', 'Status', 'Worked Minutes', 'Remarks'],
+          columns: ['Work Date', 'Status', 'Remarks'],
           rows: attendanceEvents.map((a) => [
             String(a.workDate),
             a.status,
-            a.workedMinutes ?? 0,
             a.remarks ?? '',
           ]),
         };

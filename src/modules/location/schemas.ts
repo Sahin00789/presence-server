@@ -1,100 +1,70 @@
 import { z } from 'zod';
 
 export const locationCheckBodySchema = z.object({
-  attendanceEventId: z.string().uuid(),
-  latitude: z.number().min(-90).max(90),
-  longitude: z.number().min(-180).max(180),
-  accuracyMeters: z.number().nonnegative(),
+  attendanceEventId: z.string().optional(),
+  shiftAttendanceId: z.string().optional(),
+  latitude: z.number(),
+  longitude: z.number(),
+  accuracyMeters: z.number(),
   isMock: z.boolean().optional(),
-  timestamp: z.string().datetime().optional(),
-  /** Client-generated UUID so a retried ping is stored exactly once. */
-  clientRequestId: z.string().uuid().optional(),
+  timestamp: z.string().optional(),
+  clientRequestId: z.string().optional(),
 });
-
-export type LocationCheckBody = z.infer<typeof locationCheckBodySchema>;
 
 export const locationCheckResponseSchema = z.object({
-  result: z.enum(['IN_PREMISES', 'OUTSIDE', 'STALE', 'LOW_ACCURACY', 'MOCKED', 'UNKNOWN']),
-  consecutiveFailures: z.number().int().nonnegative(),
-  exceptionCreated: z.boolean(),
+  success: z.boolean(),
+  result: z.string().optional(),
 });
 
-export const activeLocationSessionSchema = z.object({
-  attendanceEventId: z.string().uuid().nullable(),
+export const activeLocationSessionResponseSchema = z.object({
+  attendanceEventId: z.string().nullable().optional(),
   isActive: z.boolean(),
-  consecutiveFailures: z.number().int().nonnegative(),
+  consecutiveFailures: z.number(),
 });
-
-export type ActiveLocationSession = z.infer<typeof activeLocationSessionSchema>;
-
-export const gpsPingSummarySchema = z.object({
-  id: z.string(),
-  checkTime: z.string(),
-  distanceMeters: z.number().nullable(),
-  accuracyMeters: z.number().nullable(),
-  status: z.enum(['Inside', 'Outside', 'Uncertain', 'Stale', 'Mocked', 'No location']),
-});
-
-export type GpsPingSummary = z.infer<typeof gpsPingSummarySchema>;
-
-export const gpsCountsSchema = z.object({
-  inside: z.number().int().nonnegative(),
-  outside: z.number().int().nonnegative(),
-  missed: z.number().int().nonnegative(),
-});
-
-export type GpsCounts = z.infer<typeof gpsCountsSchema>;
 
 export const locationStaffCardSchema = z.object({
   staffProfileId: z.string(),
-  userId: z.string(),
   fullName: z.string(),
-  role: z.string().default('STAFF'),
-  staffCode: z.string(),
-  avatarUrl: z.string().nullable(),
-  premisesId: z.string().nullable(),
-  premisesName: z.string(),
-  attendanceStatus: z.string(),
-  locationStatus: z.enum(['Inside', 'Outside', 'GPS Uncertain', 'GPS Unavailable']),
-  dayOfWeek: z.string(),
-  shiftName: z.string(),
-  overtimeName: z.string().nullable(),
-  regularShiftStartTime: z.string().nullable(),
-  regularShiftEndTime: z.string().nullable(),
-  overtimeStartTime: z.string().nullable(),
-  overtimeEndTime: z.string().nullable(),
-  clockInTime: z.string().nullable(),
-  clockOutTime: z.string().nullable(),
-  overtimeClockInTime: z.string().nullable(),
-  overtimeClockOutTime: z.string().nullable(),
-  shiftStatus: z.string(),
-  hasOvertimeToday: z.boolean(),
-  overtimeId: z.string().uuid().nullable(),
-  consecutiveFailures: z.number().int().nonnegative(),
-  exceptionId: z.string().nullable(),
-  earnedAmountPaise: z.number().int().default(0),
-  counts: gpsCountsSchema,
-  latestPings: z.array(gpsPingSummarySchema),
+  staffCode: z.string().nullable().optional(),
+  premisesId: z.string().nullable().optional(),
+  premisesName: z.string().nullable().optional(),
+  shiftName: z.string().nullable().optional(),
+  assignedStartTime: z.string().nullable().optional(),
+  assignedEndTime: z.string().nullable().optional(),
+  attendanceEventId: z.string().nullable().optional(),
+  clockInTime: z.string().nullable().optional(),
+  clockOutTime: z.string().nullable().optional(),
+  locationStatus: z.string(),
+  consecutiveFailures: z.number(),
+  earnedAmountPaise: z.number(),
+  counts: z.object({
+    inside: z.number(),
+    outside: z.number(),
+    missed: z.number(),
+  }),
+  latestPings: z.array(
+    z.object({
+      id: z.string(),
+      timestamp: z.string(),
+      latitude: z.number(),
+      longitude: z.number(),
+      isInsideGeofence: z.boolean(),
+    })
+  ),
 });
 
-export type LocationStaffCard = z.infer<typeof locationStaffCardSchema>;
-
-export const locationPresenceQuerySchema = z.object({
-  premisesId: z.string().uuid().optional(),
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-});
-
-export type LocationPresenceQuery = z.infer<typeof locationPresenceQuerySchema>;
-
-export const locationTodayPresenceResponseSchema = z.object({
-  premisesId: z.string().nullable(),
-  premisesName: z.string().nullable(),
+export const todayLocationPresenceResponseSchema = z.object({
+  premisesId: z.string().nullable().optional(),
+  premisesName: z.string().nullable().optional(),
   address: z.string().nullable().optional(),
-  latitude: z.string().nullable(),
-  longitude: z.string().nullable(),
-  radiusMeters: z.number().nullable(),
+  radiusMeters: z.number().nullable().optional(),
+  latitude: z.number().nullable().optional(),
+  longitude: z.number().nullable().optional(),
+  summaryDate: z.string(),
   date: z.string(),
+  totalActiveStaff: z.number(),
+  totalClockedIn: z.number(),
+  outsideGeofenceCount: z.number(),
+  staffCards: z.array(locationStaffCardSchema),
   staff: z.array(locationStaffCardSchema),
 });
-
-export type LocationTodayPresenceResponse = z.infer<typeof locationTodayPresenceResponseSchema>;

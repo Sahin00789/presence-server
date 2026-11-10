@@ -50,8 +50,9 @@ export const attendanceEventSchema = z.object({
   workDate: z.string().nullable().optional(),
   faceVerified: z.boolean().optional(),
   geofenceVerified: z.boolean().optional(),
-  workedMinutes: z.number().int().optional(),
   scheduledMinutes: z.number().int().optional(),
+  lateClockInMinutes: z.number().int().optional(),
+  earlyDepartureMinutes: z.number().int().optional(),
   premisesId: z.string().uuid().nullable().optional(),
   overtimeId: z.string().uuid().nullable().optional(),
 });
@@ -74,9 +75,9 @@ export const attendanceRecordSchema = z.object({
   assignedEndTime: z.string().nullable().optional(),
   faceVerified: z.boolean().optional(),
   geofenceVerified: z.boolean().optional(),
-  workedMinutes: z.number().int().optional(),
-  overtimeMinutes: z.number().int().optional(),
   scheduledMinutes: z.number().int().optional(),
+  lateClockInMinutes: z.number().int().optional(),
+  earlyDepartureMinutes: z.number().int().optional(),
   lateMinutes: z.number().int().optional(),
   premisesId: z.string().uuid().nullable().optional(),
   overtimeId: z.string().uuid().nullable().optional(),
@@ -131,8 +132,63 @@ export const dailyAttendanceSchema = z.object({
   halfDayThreshold: z.string().optional(),
 });
 
-export const correctDailyAttendanceSchema = z.object({
-  attendanceStatus: z.enum(['PRESENT', 'ABSENT', 'LEAVE', 'HALF_DAY']),
-  remarks: z.string().trim().max(500).optional(),
-  overridePaymentAmount: z.number().min(0).optional(),
+export const manualMarkShiftSchema = z.object({
+  attendanceEventId: z.string().uuid().optional(),
+  assignShiftId: z.string().uuid().optional(),
+  shiftAssignmentId: z.string().uuid().optional(),
+  employeeId: z.string().uuid().optional(),
+  workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  action: z.enum(['ABSENT', 'HALF_DAY', 'LEAVE', 'PRESENT']),
+  reason: z.string().min(2).max(500).optional(),
+  departureTime: z.string().optional(),
 });
+
+export const manualMarkOvertimeSchema = z.object({
+  overtimeId: z.string().uuid().optional(),
+  attendanceEventId: z.string().uuid().optional(),
+  employeeId: z.string().uuid().optional(),
+  workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  action: z.enum(['ABSENT', 'HALF_DAY', 'PRESENT', 'DELETE_OVERTIME', 'CANCELLED']),
+  reason: z.string().min(2).max(500).optional(),
+  departureTime: z.string().optional(),
+});
+
+export const locationCheckBodySchema = z.object({
+  attendanceEventId: z.string().uuid(),
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  accuracyMeters: z.number().nonnegative(),
+  isMock: z.boolean().optional(),
+  timestamp: z.string().datetime().optional(),
+  clientRequestId: z.string().uuid().optional(),
+});
+
+export const shiftLocationPingSchema = z.object({
+  shiftAttendanceId: z.string().uuid().optional(),
+  attendanceEventId: z.string().uuid().optional(),
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  accuracyMeters: z.number().nonnegative(),
+  isMock: z.boolean().optional(),
+  timestamp: z.string().datetime().optional(),
+  clientRequestId: z.string().uuid().optional(),
+});
+
+export const overtimeLocationPingSchema = z.object({
+  overtimeAttendanceId: z.string().uuid().optional(),
+  attendanceEventId: z.string().uuid().optional(),
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  accuracyMeters: z.number().nonnegative(),
+  isMock: z.boolean().optional(),
+  timestamp: z.string().datetime().optional(),
+  clientRequestId: z.string().uuid().optional(),
+});
+
+export const locationCheckResponseSchema = z.object({
+  result: z.enum(['IN_PREMISES', 'OUTSIDE', 'STALE', 'LOW_ACCURACY', 'MOCKED', 'UNKNOWN']),
+  consecutiveFailures: z.number().int().nonnegative(),
+  exceptionCreated: z.boolean(),
+});
+
+

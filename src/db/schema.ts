@@ -60,9 +60,7 @@ export const locationCheckResultEnum = pgEnum('location_check_result', [
 export const earningTypeEnum = pgEnum('earning_type', ['SHIFT', 'HOLIDAY', 'OFF_DAY', 'OVERTIME']);
 export const monthlyPayrollStatusEnum = pgEnum('monthly_payroll_status', ['OPEN', 'FINALIZED', 'PAID']);
 export const overtimeStatusEnum = pgEnum('overtime_status', [
-  'REQUESTED',
-  'APPROVED',
-  'REJECTED',
+  'CREATED',
   'IN_PROGRESS',
   'COMPLETED',
   'CANCELLED',
@@ -261,18 +259,18 @@ export const employeeShiftAssignments = pgTable('employee_shift_assignments', {
   index('emp_shift_assign_org_idx').on(table.organizationId),
 ]);
 
-// 11. Employee Attendance (one row per assigned shift occurrence or overtime occurrence)
-export const employeeAttendance = pgTable('employee_attendance', {
+// 11a. Employee Shift Attendance
+export const employeeShiftAttendance = pgTable('employee_shift_attendance', {
   id: uuid('id').primaryKey().defaultRandom(),
   organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
   premisesId: uuid('premises_id').notNull().references(() => premises.id, { onDelete: 'restrict' }),
   employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'restrict' }),
-  shiftAssignmentId: uuid('shift_assignment_id').references(() => employeeShiftAssignments.id, {
+  shiftAssignmentId: uuid('shift_assignment_id').notNull().references(() => employeeShiftAssignments.id, {
     onDelete: 'restrict',
   }),
-  overtimeId: uuid('overtime_id'),
-  attendanceType: attendanceTypeEnum('attendance_type').notNull().default('SHIFT'),
   workDate: date('work_date').notNull(),
+  assignedShiftStartTime: time('assigned_shift_start_time'),
+  assignedShiftEndTime: time('assigned_shift_end_time'),
   status: attendanceStatusEnum('status').notNull().default('PRESENT'),
   clockInAt: timestamp('clock_in_at', { withTimezone: true }),
   clockOutAt: timestamp('clock_out_at', { withTimezone: true }),
@@ -281,15 +279,40 @@ export const employeeAttendance = pgTable('employee_attendance', {
   insidePingCount: integer('inside_ping_count').notNull().default(0),
   outsidePingCount: integer('outside_ping_count').notNull().default(0),
   consecutivePingFailures: integer('consecutive_ping_failures').notNull().default(0),
-  lastPingAt: timestamp('last_ping_at', { withTimezone: true }),
-  lastPingResult: locationCheckResultEnum('last_ping_result'),
-  lastSuccessfulPingAt: timestamp('last_successful_ping_at', { withTimezone: true }),
-  monitoringAlertAt: timestamp('monitoring_alert_at', { withTimezone: true }),
   faceScore: numeric('face_score', { precision: 5, scale: 4 }),
-  scheduledMinutes: integer('scheduled_minutes').notNull().default(0),
-  workedMinutes: integer('worked_minutes').notNull().default(0),
-  overtimeMinutes: integer('overtime_minutes').notNull().default(0),
-  earlyDeparture: boolean('early_departure').notNull().default(false),
+git  statusUpdatedBy: uuid('status_updated_by').references(() => users.id, { onDelete: 'set null' }),
+  remarks: text('remarks'),
+  correctionReason: text('correction_reason'),
+  correctedAt: timestamp('corrected_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('employee_shift_attendance_assignment_date_idx')
+    .on(table.shiftAssignmentId, table.workDate),
+  index('employee_shift_attendance_org_premises_date_idx').on(table.organizationId, table.premisesId, table.workDate),
+  index('employee_shift_attendance_emp_date_idx').on(table.employeeId, table.workDate),
+  index('employee_shift_attendance_active_idx').on(table.organizationId, table.status, table.clockInAt),
+]);
+
+// 11b. Employee Overtime Attendance
+export const employeeOvertimeAttendance = pgTable('employee_overtime_attendance', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  premisesId: uuid('premises_id').notNull().references(() => premises.id, { onDelete: 'restrict' }),
+  employeeId: uuid('employee_id').notNull().references(() => employees.id, { onDelete: 'restrict' }),
+  overtimeId: uuid('overtime_id').notNull().references(() => overtime.id, { onDelete: 'restrict' }),
+  workDate: date('work_date').notNull(),
+  assignedOvertimeStartTime: time('assigned_overtime_start_time'),
+  assignedOvertimeEndTime: time('assigned_overtime_end_time'),
+  status: attendanceStatusEnum('status').notNull().default('PRESENT'),
+  clockInAt: timestamp('clock_in_at', { withTimezone: true }),
+  clockOutAt: timestamp('clock_out_at', { withTimezone: true }),
+  faceVerified: boolean('face_verified').notNull().default(false),
+  geofenceVerified: boolean('geofence_verified').notNull().default(false),
+  insidePingCount: integer('inside_ping_count').notNull().default(0),
+  outsidePingCount: integer('outside_ping_count').notNull().default(0),
+  consecutivePingFailures: integer('consecutive_ping_failures').notNull().default(0),
+  faceScore: numeric('face_score', { precision: 5, scale: 4 }),
   statusUpdatedBy: uuid('status_updated_by').references(() => users.id, { onDelete: 'set null' }),
   remarks: text('remarks'),
   correctionReason: text('correction_reason'),
@@ -297,27 +320,22 @@ export const employeeAttendance = pgTable('employee_attendance', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
-  uniqueIndex('employee_attendance_shift_workdate_idx')
-    .on(table.shiftAssignmentId, table.workDate)
-    .where(sql`attendance_type = 'SHIFT' AND shift_assignment_id IS NOT NULL`),
-  uniqueIndex('employee_attendance_overtime_idx')
-    .on(table.overtimeId)
-    .where(sql`attendance_type = 'OVERTIME' AND overtime_id IS NOT NULL`),
-  index('employee_attendance_org_premises_date_idx').on(table.organizationId, table.premisesId, table.workDate),
-  index('employee_attendance_emp_date_idx').on(table.employeeId, table.workDate),
-  index('employee_attendance_active_idx').on(table.organizationId, table.status, table.clockInAt),
-  check(
-    'employee_attendance_reference_check',
-    sql`(attendance_type = 'SHIFT' AND shift_assignment_id IS NOT NULL AND overtime_id IS NULL)
-      OR (attendance_type = 'OVERTIME' AND overtime_id IS NOT NULL AND shift_assignment_id IS NULL)`
-  ),
+  uniqueIndex('employee_overtime_attendance_overtime_idx').on(table.overtimeId),
+  index('employee_overtime_attendance_org_premises_date_idx').on(table.organizationId, table.premisesId, table.workDate),
+  index('employee_overtime_attendance_emp_date_idx').on(table.employeeId, table.workDate),
+  index('employee_overtime_attendance_active_idx').on(table.organizationId, table.status, table.clockInAt),
 ]);
+
+export const employeeAttendance = employeeShiftAttendance;
 
 // 12. Attendance Location Pings
 export const attendanceLocationPings = pgTable('attendance_location_pings', {
   id: uuid('id').primaryKey().defaultRandom(),
-  attendanceId: uuid('attendance_id').notNull().references(() => employeeAttendance.id, {
-    onDelete: 'restrict',
+  shiftAttendanceId: uuid('shift_attendance_id').references(() => employeeShiftAttendance.id, {
+    onDelete: 'cascade',
+  }),
+  overtimeAttendanceId: uuid('overtime_attendance_id').references(() => employeeOvertimeAttendance.id, {
+    onDelete: 'cascade',
   }),
   checkedAt: timestamp('checked_at', { withTimezone: true }).notNull().defaultNow(),
   latitude: numeric('latitude', { precision: 10, scale: 7 }),
@@ -327,10 +345,19 @@ export const attendanceLocationPings = pgTable('attendance_location_pings', {
   clientRequestId: text('client_request_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
-  uniqueIndex('attendance_pings_request_id_idx')
-    .on(table.attendanceId, table.clientRequestId)
-    .where(sql`client_request_id IS NOT NULL`),
-  index('attendance_pings_attendance_checked_idx').on(table.attendanceId, table.checkedAt),
+  uniqueIndex('attendance_pings_shift_request_id_idx')
+    .on(table.shiftAttendanceId, table.clientRequestId)
+    .where(sql`client_request_id IS NOT NULL AND shift_attendance_id IS NOT NULL`),
+  uniqueIndex('attendance_pings_overtime_request_id_idx')
+    .on(table.overtimeAttendanceId, table.clientRequestId)
+    .where(sql`client_request_id IS NOT NULL AND overtime_attendance_id IS NOT NULL`),
+  index('attendance_pings_shift_checked_idx').on(table.shiftAttendanceId, table.checkedAt),
+  index('attendance_pings_overtime_checked_idx').on(table.overtimeAttendanceId, table.checkedAt),
+  check(
+    'attendance_pings_reference_check',
+    sql`(shift_attendance_id IS NOT NULL AND overtime_attendance_id IS NULL)
+      OR (overtime_attendance_id IS NOT NULL AND shift_attendance_id IS NULL)`
+  ),
 ]);
 
 // 13. Monthly Payrolls
@@ -368,7 +395,7 @@ export const overtime = pgTable('overtime', {
   plannedMinutes: integer('planned_minutes').notNull(),
   workedMinutes: integer('worked_minutes').notNull().default(0),
   paymentInr: bigint('payment_inr', { mode: 'number' }).notNull(),
-  status: overtimeStatusEnum('status').notNull().default('REQUESTED'),
+  status: overtimeStatusEnum('status').notNull().default('CREATED'),
   reason: text('reason'),
   attendanceId: uuid('attendance_id').references(() => employeeAttendance.id, { onDelete: 'set null' }),
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),

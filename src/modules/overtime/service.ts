@@ -232,7 +232,7 @@ export async function createOvertime(
       endTime: input.endTime,
       plannedMinutes,
       paymentInr: input.paymentInr,
-      status: 'APPROVED',
+      status: 'CREATED',
       reason: input.reason,
     })
     .returning();

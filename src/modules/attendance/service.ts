@@ -5,9 +5,11 @@ const staffEarningLedger = (schema as any).employeeEarningLedger ?? (schema as a
 import { AppError } from '../../shared/errors/app-error.js';
 import {
   evaluateGeofence,
+  haversineDistanceMeters,
+  roundDistanceMeters,
   DEFAULT_GEOFENCE_RADIUS_METERS,
 } from '../../shared/utils/geo.js';
-import { findStaffProfile } from '../../shared/services/staff.service.js';
+
 import {
   addDays,
   enumerateDates,
@@ -25,8 +27,10 @@ import {
 } from '../../shared/utils/liveness.js';
 import { createNotification } from '../../shared/services/notification.service.js';
 import {
+  findStaffProfile,
   listManagerUserIds,
   listOwnerUserIds,
+  resolveNotificationTargets,
 } from '../../shared/services/staff.service.js';
 
 type AttendanceRow = typeof schema.employeeAttendance.$inferSelect;
@@ -44,10 +48,10 @@ export function toPublicAttendanceEvent(event: AttendanceRow) {
     workDate: event.workDate ? String(event.workDate) : null,
     faceVerified: event.faceVerified,
     geofenceVerified: event.geofenceVerified,
-    workedMinutes: event.workedMinutes,
-    scheduledMinutes: event.scheduledMinutes,
+    assignedStartTime: (event as any).assignedShiftStartTime || (event as any).assignedOvertimeStartTime || null,
+    assignedEndTime: (event as any).assignedShiftEndTime || (event as any).assignedOvertimeEndTime || null,
     premisesId: event.premisesId,
-    overtimeId: event.overtimeId ?? null,
+    overtimeId: (event as any).overtimeId ?? null,
   };
 }
 
@@ -335,16 +339,15 @@ async function findExistingShiftAttendance(
   organizationId: string,
   shiftAssignmentId: string,
   workDate: string
-): Promise<AttendanceRow | null> {
+) {
   const [existing] = await fastify.db
     .select()
-    .from(schema.employeeAttendance)
+    .from(schema.employeeShiftAttendance)
     .where(
       and(
-        eq(schema.employeeAttendance.organizationId, organizationId),
-        eq(schema.employeeAttendance.shiftAssignmentId, shiftAssignmentId),
-        eq(schema.employeeAttendance.workDate, workDate),
-        eq(schema.employeeAttendance.attendanceType, 'SHIFT')
+        eq(schema.employeeShiftAttendance.organizationId, organizationId),
+        eq(schema.employeeShiftAttendance.shiftAssignmentId, shiftAssignmentId),
+        eq(schema.employeeShiftAttendance.workDate, workDate)
       )
     )
     .limit(1);
@@ -355,22 +358,21 @@ async function findExistingOvertimeAttendance(
   fastify: FastifyInstance,
   organizationId: string,
   overtimeId: string
-): Promise<AttendanceRow | null> {
+) {
   const [existing] = await fastify.db
     .select()
-    .from(schema.employeeAttendance)
+    .from(schema.employeeOvertimeAttendance)
     .where(
       and(
-        eq(schema.employeeAttendance.organizationId, organizationId),
-        eq(schema.employeeAttendance.overtimeId, overtimeId),
-        eq(schema.employeeAttendance.attendanceType, 'OVERTIME')
+        eq(schema.employeeOvertimeAttendance.organizationId, organizationId),
+        eq(schema.employeeOvertimeAttendance.overtimeId, overtimeId)
       )
     )
     .limit(1);
   return existing ?? null;
 }
 
-export async function clockIn(
+async function clockIn(
   fastify: FastifyInstance,
   userId: string,
   organizationId: string,
@@ -516,7 +518,7 @@ export async function clockIn(
         'OVERTIME_NOT_ASSIGNED_TO_YOU'
       );
     }
-    if (entry.status !== 'APPROVED') {
+    if (entry.status !== 'CREATED' && entry.status !== 'IN_PROGRESS') {
       throw new AppError(
         'Overtime entry is not open for check-in',
         409,
@@ -582,31 +584,49 @@ export async function clockIn(
     status = 'PRESENT';
   }
 
-  let event: AttendanceRow;
+  let event: any;
   try {
-    [event] = await fastify.db
-      .insert(schema.employeeAttendance)
-      .values({
-        organizationId,
-        premisesId: premises.id,
-        employeeId: profile.id,
-        shiftAssignmentId: shift?.assignmentId ?? null,
-        overtimeId: overtime?.id ?? null,
-        attendanceType: overtime ? 'OVERTIME' : 'SHIFT',
-        workDate,
-        status,
-        clockInAt: now,
-        faceVerified: true,
-        geofenceVerified: true,
-        faceScore: faceScore != null ? faceScore.toFixed(4) : (body.faceScore ? body.faceScore.toFixed(4) : null),
-        scheduledMinutes,
-        lastPingAt: now,
-        lastPingResult: 'IN_PREMISES',
-        lastSuccessfulPingAt: now,
-        consecutivePingFailures: 0,
-        insidePingCount: 1,
-      })
-      .returning();
+    if (overtime) {
+      [event] = await fastify.db
+        .insert(schema.employeeOvertimeAttendance)
+        .values({
+          organizationId,
+          premisesId: premises.id,
+          employeeId: profile.id,
+          overtimeId: overtime.id,
+          workDate,
+          assignedOvertimeStartTime: overtime.startTime,
+          assignedOvertimeEndTime: overtime.endTime,
+          status,
+          clockInAt: now,
+          faceVerified: true,
+          geofenceVerified: true,
+          faceScore: faceScore != null ? faceScore.toFixed(4) : (body.faceScore ? body.faceScore.toFixed(4) : null),
+          consecutivePingFailures: 0,
+          insidePingCount: 1,
+        })
+        .returning();
+    } else {
+      [event] = await fastify.db
+        .insert(schema.employeeShiftAttendance)
+        .values({
+          organizationId,
+          premisesId: premises.id,
+          employeeId: profile.id,
+          shiftAssignmentId: shift!.assignmentId,
+          workDate,
+          assignedShiftStartTime: shift!.startTime,
+          assignedShiftEndTime: shift!.endTime,
+          status,
+          clockInAt: now,
+          faceVerified: true,
+          geofenceVerified: true,
+          faceScore: faceScore != null ? faceScore.toFixed(4) : (body.faceScore ? body.faceScore.toFixed(4) : null),
+          consecutivePingFailures: 0,
+          insidePingCount: 1,
+        })
+        .returning();
+    }
   } catch (error) {
     // The unique indexes make clock-in race-safe. Return the winner instead of
     // creating a duplicate attendance row.
@@ -736,21 +756,19 @@ export async function requestManualClockIn(
   );
 
   const [event] = await fastify.db
-    .insert(schema.employeeAttendance)
+    .insert(schema.employeeShiftAttendance)
     .values({
       organizationId,
       premisesId: premises.id,
       employeeId: profile.id,
       shiftAssignmentId: shift.assignmentId,
-      attendanceType: 'SHIFT',
       workDate: shift.workDate,
+      assignedShiftStartTime: shift.startTime,
+      assignedShiftEndTime: shift.endTime,
       status: 'PRESENT',
       clockInAt: now,
       faceVerified: false,
       geofenceVerified: geofence.result === 'IN_PREMISES',
-      scheduledMinutes: shift.scheduledMinutes,
-      lastPingAt: now,
-      lastPingResult: geofence.result as LocationResult,
     })
     .returning();
 
@@ -860,50 +878,11 @@ export async function clockOut(
 
   const now = new Date();
 
-  if (event.attendanceType === 'OVERTIME' && event.overtimeId) {
-    const [updated] = await fastify.db
-      .update(schema.employeeAttendance)
-      .set({
-        clockOutAt: now,
-        status: 'PRESENT',
-        workedMinutes: event.workedMinutes || 0,
-        overtimeMinutes: event.workedMinutes || 0,
-        updatedAt: now,
-      })
-      .where(eq(schema.employeeAttendance.id, event.id))
-      .returning();
-
-    await completeOvertime(
-      fastify,
-      organizationId,
-      event.overtimeId,
-      event.workedMinutes || 0,
-      event.id
-    );
-
-    if (typeof fastify.publishDomainEvent === 'function') {
-      await fastify.publishDomainEvent({
-        type: 'attendance_update',
-        organizationId,
-        userIds: profile.userId ? [profile.userId] : [],
-        payload: {
-          attendanceEventId: event.id,
-          staffProfileId: profile.id,
-          status: 'PRESENT',
-          action: 'CLOCK_OUT',
-        },
-      });
-    }
-
-    return toPublicAttendanceEvent(updated);
-  }
-
   const [updated] = await fastify.db
     .update(schema.employeeAttendance)
     .set({
       clockOutAt: now,
       status: 'PRESENT',
-      workedMinutes: event.workedMinutes || event.scheduledMinutes || 0,
       updatedAt: now,
     })
     .where(eq(schema.employeeAttendance.id, event.id))
@@ -1179,46 +1158,38 @@ export async function listAttendanceRecords(
 
   const rows = await fastify.db
     .select({
-      event: schema.employeeAttendance,
+      event: schema.employeeShiftAttendance,
       staffName: schema.users.fullName,
       staffEmail: schema.users.email,
       staffCode: schema.employees.employeeCode,
       shiftName: schema.shifts.shiftName,
       shiftStartTime: schema.shifts.startTime,
       shiftEndTime: schema.shifts.endTime,
-      overtimeStartTime: schema.overtime.startTime,
-      overtimeEndTime: schema.overtime.endTime,
-      overtimeReason: schema.overtime.reason,
     })
-    .from(schema.employeeAttendance)
+    .from(schema.employeeShiftAttendance)
     .innerJoin(
       schema.employees,
-      eq(schema.employees.id, schema.employeeAttendance.employeeId)
+      eq(schema.employees.id, schema.employeeShiftAttendance.employeeId)
     )
     .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
     .leftJoin(
       schema.employeeShiftAssignments,
-      eq(schema.employeeShiftAssignments.id, schema.employeeAttendance.shiftAssignmentId)
+      eq(schema.employeeShiftAssignments.id, schema.employeeShiftAttendance.shiftAssignmentId)
     )
     .leftJoin(
       schema.shifts,
       eq(schema.shifts.id, schema.employeeShiftAssignments.shiftId)
     )
-    .leftJoin(
-      schema.overtime,
-      eq(schema.overtime.id, schema.employeeAttendance.overtimeId)
-    )
     .where(and(...conditions))
     .orderBy(
-      desc(schema.employeeAttendance.workDate),
-      desc(schema.employeeAttendance.clockInAt)
+      desc(schema.employeeShiftAttendance.workDate),
+      desc(schema.employeeShiftAttendance.clockInAt)
     )
     .limit(query.limit ?? 100)
     .offset(query.offset ?? 0);
 
   return rows.map((r) => {
-    const isOvertime = r.event.attendanceType === 'OVERTIME' || Boolean(r.event.overtimeId);
-    const assignedStartTime = isOvertime ? r.overtimeStartTime : r.shiftStartTime;
+    const assignedStartTime = r.event.assignedShiftStartTime || r.shiftStartTime;
     let lateMinutes = 0;
     if (r.event.clockInAt && assignedStartTime) {
       try {
@@ -1248,19 +1219,14 @@ export async function listAttendanceRecords(
       clockIn: r.event.clockInAt,
       clockOut: r.event.clockOutAt,
       status: r.event.status,
-      attendanceType: r.event.attendanceType,
-      shiftName: isOvertime
-        ? (r.overtimeReason || 'Overtime Session')
-        : (r.shiftName || 'Shift Session'),
+      attendanceType: 'SHIFT',
+      shiftName: r.shiftName || 'Shift Session',
       assignedStartTime,
-      assignedEndTime: isOvertime ? r.overtimeEndTime : r.shiftEndTime,
+      assignedEndTime: r.event.assignedShiftEndTime || r.shiftEndTime,
       faceVerified: r.event.faceVerified,
       geofenceVerified: r.event.geofenceVerified,
-      workedMinutes: r.event.workedMinutes,
-      scheduledMinutes: r.event.scheduledMinutes,
-      overtimeMinutes: r.event.overtimeMinutes,
       lateMinutes,
-      overtimeId: r.event.overtimeId ?? null,
+      overtimeId: null,
     };
   });
 }
@@ -1361,9 +1327,6 @@ export async function buildAttendanceSummary(
     }
 
     if (event) {
-      totalWorkedMinutes += event.workedMinutes ?? 0;
-      totalOvertimeMinutes += event.overtimeMinutes ?? 0;
-
       if (event.status === 'PRESENT') {
         presentDays += 1;
       } else if (event.status === 'HALF_DAY') {
@@ -1480,7 +1443,6 @@ export async function resolveException(
         remarks: input.note ?? input.reason,
         correctionReason: input.reason,
         correctedAt: now,
-        monitoringAlertAt: null,
         consecutivePingFailures:
           input.correctedStatus === 'RESUME'
             ? 0
@@ -1601,135 +1563,6 @@ export async function getDailyAttendanceByDateAndPremises(
   }));
 }
 
-export async function correctDailyAttendance(
-  fastify: FastifyInstance,
-  actorUserId: string,
-  organizationId: string,
-  dailyAttendanceId: string,
-  input: {
-    attendanceStatus: 'PRESENT' | 'ABSENT' | 'LEAVE' | 'HALF_DAY';
-    remarks?: string;
-    overridePaymentAmount?: number;
-  }
-) {
-  const [record] = await fastify.db
-    .select()
-    .from(schema.employeeAttendance)
-    .where(
-      and(
-        eq(schema.employeeAttendance.id, dailyAttendanceId),
-        eq(schema.employeeAttendance.organizationId, organizationId)
-      )
-    )
-    .limit(1);
-
-  if (!record) {
-    throw new AppError(
-      'Daily attendance record not found',
-      404,
-      'ATTENDANCE_NOT_FOUND'
-    );
-  }
-
-  const [assignment] = record.shiftAssignmentId
-    ? await fastify.db
-        .select({
-          presentPay: schema.employeeShiftAssignments.presentPay,
-          halfDayPay: schema.employeeShiftAssignments.halfDayPay,
-          absentPay: schema.employeeShiftAssignments.absentPay,
-          leavePay: schema.employeeShiftAssignments.leavePay,
-        })
-        .from(schema.employeeShiftAssignments)
-        .where(
-          eq(schema.employeeShiftAssignments.id, record.shiftAssignmentId)
-        )
-        .limit(1)
-    : [];
-
-  const centsFromMoney = (value: string | number | null | undefined) =>
-    Math.round(Number(value ?? 0) * 100);
-
-  const statusPayCents =
-    input.attendanceStatus === 'HALF_DAY'
-      ? centsFromMoney(assignment?.halfDayPay)
-      : input.attendanceStatus === 'ABSENT'
-        ? centsFromMoney(assignment?.absentPay)
-        : input.attendanceStatus === 'LEAVE'
-          ? centsFromMoney(assignment?.leavePay)
-          : centsFromMoney(assignment?.presentPay);
-
-  const paymentCents =
-    input.overridePaymentAmount !== undefined
-      ? Math.round(input.overridePaymentAmount * 100)
-      : statusPayCents;
-
-  const now = new Date();
-
-  const [updated] = await fastify.db.transaction(async (tx) => {
-    const [attendance] = await tx
-      .update(schema.employeeAttendance)
-      .set({
-        status: input.attendanceStatus,
-        statusUpdatedBy: actorUserId,
-        remarks: input.remarks ?? null,
-        correctionReason: input.remarks ?? 'Manual attendance correction',
-        correctedAt: now,
-        updatedAt: now,
-      })
-      .where(eq(schema.employeeAttendance.id, dailyAttendanceId))
-      .returning();
-
-    const [existingEarning] = await tx
-      .select({ id: staffEarningLedger.id })
-      .from(staffEarningLedger)
-      .where(
-        and(
-          eq(staffEarningLedger.attendanceId, dailyAttendanceId),
-          eq(staffEarningLedger.type, 'SHIFT')
-        )
-      )
-      .limit(1);
-
-    if (paymentCents > 0) {
-      const amount = (paymentCents / 100).toFixed(2);
-      if (existingEarning) {
-        await tx
-          .update(staffEarningLedger)
-          .set({ amount, updatedAt: now })
-          .where(eq(staffEarningLedger.id, existingEarning.id));
-      } else {
-        await tx.insert(staffEarningLedger).values({
-          organizationId,
-          premisesId: record.premisesId,
-          employeeId: record.employeeId,
-          earningDate: record.workDate,
-          type: 'SHIFT',
-          amount,
-          shiftAssignmentId: record.shiftAssignmentId,
-          attendanceId: record.id,
-          sourceReference: `attendance:${record.id}:SHIFT`,
-        });
-      }
-    } else if (existingEarning) {
-      await tx
-        .update(staffEarningLedger)
-        .set({ amount: '0.00', updatedAt: now })
-        .where(eq(staffEarningLedger.id, existingEarning.id));
-    }
-
-    return [attendance];
-  });
-
-  return {
-    id: updated.id,
-    attendanceStatus: updated.status,
-    paymentAmount:
-      input.overridePaymentAmount !== undefined
-        ? input.overridePaymentAmount.toFixed(2)
-        : (paymentCents / 100).toFixed(2),
-  };
-}
-
 export async function getEmployeeAttendanceAndEarningsHistory(
   fastify: FastifyInstance,
   organizationId: string,
@@ -1806,52 +1639,543 @@ export async function getUpcomingAttendance(fastify: any, organizationId: string
   } catch (e) {
     shift = null;
   }
-  const upcomingOvertime = await fastify.db.select().from(schema.overtime).where(and(eq(schema.overtime.organizationId, organizationId), eq(schema.overtime.employeeId, profile.id), eq(schema.overtime.workDate, targetDate), eq(schema.overtime.status, 'APPROVED'))).orderBy(schema.overtime.startTime);
+  const upcomingOvertime = await fastify.db.select().from(schema.overtime).where(and(eq(schema.overtime.organizationId, organizationId), eq(schema.overtime.employeeId, profile.id), eq(schema.overtime.workDate, targetDate), inArray(schema.overtime.status, ['CREATED', 'IN_PROGRESS']))).orderBy(schema.overtime.startTime);
   return { date: targetDate, shift, overtime: upcomingOvertime };
 }
 
-export async function manualMarkAttendance(fastify: any, organizationId: string, actorUserId: string, input: any) {
-  if (input.action === 'DELETE_OVERTIME') {
-    if (!input.overtimeId) throw new AppError('overtimeId required', 400, 'OVERTIME_ID_REQUIRED');
-    const [ot] = await fastify.db.select().from(schema.overtime).where(and(eq(schema.overtime.id, input.overtimeId), eq(schema.overtime.organizationId, organizationId))).limit(1);
-    if (!ot) throw new AppError('Overtime not found', 404, 'OVERTIME_NOT_FOUND');
-    const now = new Date();
-    if (now.getTime() > new Date(String(ot.workDate) + 'T' + ot.endTime).getTime()) throw new AppError('Cannot delete overtime after it has ended', 400, 'OVERTIME_ENDED');
-    await fastify.db.delete(schema.overtime).where(eq(schema.overtime.id, input.overtimeId));
-    return { deleted: true, overtimeId: input.overtimeId };
+export async function getNextUpcomingAttendance(fastify: any, organizationId: string, userId: string) {
+  const upcoming = await getUpcomingAttendance(fastify, organizationId, userId);
+  const shift = upcoming.shift;
+  const ot = upcoming.overtime?.[0] ?? null;
+
+  if (!shift && !ot) {
+    return { nextSession: null };
   }
+
+  if (ot && (!shift || (ot.startTime && shift.startTime && ot.startTime < shift.startTime))) {
+    return {
+      nextSession: {
+        kind: 'OVERTIME',
+        overtimeId: ot.id,
+        workDate: String(ot.workDate),
+        startTime: ot.startTime,
+        endTime: ot.endTime,
+        reason: ot.reason,
+        paymentInr: ot.paymentInr,
+      },
+    };
+  }
+
+  return {
+    nextSession: {
+      kind: 'SHIFT',
+      assignmentId: shift.assignmentId,
+      workDate: shift.workDate,
+      startTime: shift.startTime,
+      endTime: shift.endTime,
+    },
+  };
+}
+
+export async function clockInShift(fastify: any, userId: string, organizationId: string, body: any) {
+  const { overtimeId, ...shiftBody } = body;
+  return clockIn(fastify, userId, organizationId, shiftBody);
+}
+
+export async function clockInOvertime(fastify: any, userId: string, organizationId: string, body: any) {
+  if (!body.overtimeId) {
+    throw new AppError('overtimeId required for overtime clock-in', 400, 'OVERTIME_ID_REQUIRED');
+  }
+  return clockIn(fastify, userId, organizationId, body);
+}
+
+export async function correctShiftAttendance(
+  fastify: any,
+  organizationId: string,
+  actorUserId: string,
+  input: {
+    attendanceEventId?: string;
+    assignShiftId?: string;
+    shiftAssignmentId?: string;
+    employeeId?: string;
+    workDate?: string;
+    action: 'ABSENT' | 'HALF_DAY' | 'LEAVE' | 'PRESENT';
+    reason?: string;
+    departureTime?: string;
+  }
+) {
+  const targetShiftAssignmentId = input.assignShiftId || input.shiftAssignmentId;
   let event: any = null;
+
   if (input.attendanceEventId) {
-    const [row] = await fastify.db.select().from(schema.employeeAttendance).where(and(eq(schema.employeeAttendance.id, input.attendanceEventId), eq(schema.employeeAttendance.organizationId, organizationId))).limit(1);
+    const [row] = await fastify.db
+      .select()
+      .from(schema.employeeAttendance)
+      .where(
+        and(
+          eq(schema.employeeAttendance.id, input.attendanceEventId),
+          eq(schema.employeeAttendance.organizationId, organizationId)
+        )
+      )
+      .limit(1);
+    event = row ?? null;
+  } else if (targetShiftAssignmentId && input.workDate) {
+    const [row] = await fastify.db
+      .select()
+      .from(schema.employeeAttendance)
+      .where(
+        and(
+          eq(schema.employeeAttendance.organizationId, organizationId),
+          eq(schema.employeeAttendance.shiftAssignmentId, targetShiftAssignmentId),
+          eq(schema.employeeAttendance.workDate, input.workDate)
+        )
+      )
+      .limit(1);
     event = row ?? null;
   } else if (input.employeeId && input.workDate) {
-    const [row] = await fastify.db.select().from(schema.employeeAttendance).where(and(eq(schema.employeeAttendance.organizationId, organizationId), eq(schema.employeeAttendance.employeeId, input.employeeId), eq(schema.employeeAttendance.workDate, input.workDate))).limit(1);
+    const [row] = await fastify.db
+      .select()
+      .from(schema.employeeAttendance)
+      .where(
+        and(
+          eq(schema.employeeAttendance.organizationId, organizationId),
+          eq(schema.employeeAttendance.employeeId, input.employeeId),
+          eq(schema.employeeAttendance.workDate, input.workDate)
+        )
+      )
+      .limit(1);
     event = row ?? null;
   }
-  if (!event) throw new AppError('Attendance event not found', 404, 'ATTENDANCE_EVENT_NOT_FOUND');
-  if (!event.clockInAt) throw new AppError('Manual marking only allowed after clock-in', 400, 'NOT_CLOCKED_IN');
-  if (event.attendanceType === 'SHIFT') {
-    if (input.action !== 'ABSENT' && input.action !== 'HALF_DAY') {
-      throw new AppError('Only ABSENT or HALF_DAY allowed for shift manual marking', 400, 'INVALID_ACTION');
-    }
-  } else if (event.attendanceType === 'OVERTIME') {
-    throw new AppError('For overtime sessions, action must be DELETE_OVERTIME', 400, 'INVALID_ACTION');
+
+  const now = new Date();
+  const updateFields: any = {
+    status: input.action,
+    updatedAt: now,
+    statusUpdatedBy: actorUserId,
+    correctionReason: input.reason ?? null,
+    correctedAt: now,
+  };
+  if (targetShiftAssignmentId) {
+    updateFields.shiftAssignmentId = targetShiftAssignmentId;
   }
-  const timezone = await resolveTimezone(fastify, organizationId);
-  let endAt: Date | null = null;
-  if (event.attendanceType === 'SHIFT' && event.shiftAssignmentId) {
-    const [shift] = await fastify.db.select({ startTime: schema.shifts.startTime, endTime: schema.shifts.endTime }).from(schema.employeeAttendance).innerJoin(schema.employeeShiftAssignments, eq(schema.employeeShiftAssignments.id, schema.employeeAttendance.shiftAssignmentId)).innerJoin(schema.shifts, eq(schema.shifts.id, schema.employeeShiftAssignments.shiftId)).where(eq(schema.employeeAttendance.id, event.id)).limit(1);
-    if (shift) {
-      const window = resolveShiftWindow(String(event.workDate), shift.startTime, shift.endTime, 0, timezone);
-      endAt = window.endAt;
+
+  if (event) {
+    if (input.departureTime) {
+      const dateStr = String(event.workDate);
+      const departureIso = new Date(`${dateStr}T${input.departureTime}`).toISOString();
+      updateFields.clockOutAt = departureIso;
+      updateFields.clockOut = new Date(departureIso);
     }
+
+    const [updated] = await fastify.db
+      .update(schema.employeeAttendance)
+      .set(updateFields)
+      .where(eq(schema.employeeAttendance.id, event.id))
+      .returning();
+
+    return toPublicAttendanceEvent(updated);
+  } else {
+    let empId = input.employeeId;
+    let premId: string | null = null;
+
+    if (targetShiftAssignmentId) {
+      const [assignment] = await fastify.db
+        .select()
+        .from(schema.employeeShiftAssignments)
+        .where(eq(schema.employeeShiftAssignments.id, targetShiftAssignmentId))
+        .limit(1);
+      if (assignment) {
+        empId = empId || assignment.employeeId;
+        premId = assignment.premisesId;
+      }
+    }
+
+    if (!empId || !input.workDate) {
+      throw new AppError('Shift attendance record not found and insufficient data to create one', 404, 'ATTENDANCE_EVENT_NOT_FOUND');
+    }
+
+    const dateStr = String(input.workDate);
+    let departureIso: string | null = null;
+    if (input.departureTime) {
+      departureIso = new Date(`${dateStr}T${input.departureTime}`).toISOString();
+    }
+
+    const [created] = await fastify.db
+      .insert(schema.employeeAttendance)
+      .values({
+        organizationId,
+        premisesId: premId,
+        employeeId: empId,
+        shiftAssignmentId: targetShiftAssignmentId ?? null,
+        attendanceType: 'SHIFT',
+        workDate: input.workDate,
+        status: input.action,
+        clockOutAt: departureIso,
+        clockOut: departureIso ? new Date(departureIso) : null,
+        statusUpdatedBy: actorUserId,
+        correctionReason: input.reason ?? null,
+        correctedAt: now,
+      })
+      .returning();
+
+    return toPublicAttendanceEvent(created);
   }
-  if (endAt && new Date() > endAt) throw new AppError('Manual marking not allowed after shift has ended', 400, 'SHIFT_ENDED');
-  const outside = Number(event.outsidePingCount || 0);
-  if (outside <= 3) throw new AppError('Manual marking only allowed when outside count > 3', 400, 'MANUAL_MARK_NOT_ALLOWED');
-  const targetStatus = input.action;
-  const [updated] = await fastify.db.update(schema.employeeAttendance).set({ status: targetStatus, updatedAt: new Date(), statusUpdatedBy: actorUserId, correctionReason: input.reason ?? null, correctedAt: new Date() }).where(eq(schema.employeeAttendance.id, event.id)).returning();
+}
+
+export async function correctOvertimeAttendance(
+  fastify: any,
+  organizationId: string,
+  actorUserId: string,
+  input: {
+    overtimeId?: string;
+    attendanceEventId?: string;
+    employeeId?: string;
+    workDate?: string;
+    action: 'ABSENT' | 'HALF_DAY' | 'PRESENT' | 'DELETE_OVERTIME' | 'CANCELLED';
+    reason?: string;
+    departureTime?: string;
+  }
+) {
+  if (input.action === 'DELETE_OVERTIME' || input.action === 'CANCELLED') {
+    const otId = input.overtimeId;
+    if (!otId) {
+      throw new AppError('overtimeId required to delete/cancel overtime', 400, 'OVERTIME_ID_REQUIRED');
+    }
+    const [ot] = await fastify.db
+      .select()
+      .from(schema.overtime)
+      .where(
+        and(
+          eq(schema.overtime.id, otId),
+          eq(schema.overtime.organizationId, organizationId)
+        )
+      )
+      .limit(1);
+
+    if (!ot) {
+      throw new AppError('Overtime entry not found', 404, 'OVERTIME_NOT_FOUND');
+    }
+
+    await fastify.db
+      .update(schema.overtime)
+      .set({ status: 'CANCELLED', resolvedAt: new Date(), updatedAt: new Date() })
+      .where(eq(schema.overtime.id, otId));
+
+    return { deleted: true, overtimeId: otId, status: 'CANCELLED' };
+  }
+
+  let event: any = null;
+  if (input.attendanceEventId) {
+    const [row] = await fastify.db
+      .select()
+      .from(schema.employeeOvertimeAttendance)
+      .where(
+        and(
+          eq(schema.employeeOvertimeAttendance.id, input.attendanceEventId),
+          eq(schema.employeeOvertimeAttendance.organizationId, organizationId)
+        )
+      )
+      .limit(1);
+    event = row ?? null;
+  } else if (input.overtimeId) {
+    const [row] = await fastify.db
+      .select()
+      .from(schema.employeeOvertimeAttendance)
+      .where(
+        and(
+          eq(schema.employeeOvertimeAttendance.overtimeId, input.overtimeId),
+          eq(schema.employeeOvertimeAttendance.organizationId, organizationId)
+        )
+      )
+      .limit(1);
+    event = row ?? null;
+  }
+
+  if (!event) {
+    throw new AppError('Overtime attendance record not found', 404, 'ATTENDANCE_EVENT_NOT_FOUND');
+  }
+
+  const updateFields: any = {
+    status: input.action === 'PRESENT' ? 'PRESENT' : input.action,
+    updatedAt: new Date(),
+    statusUpdatedBy: actorUserId,
+    correctionReason: input.reason ?? null,
+    correctedAt: new Date(),
+  };
+
+  if (input.departureTime) {
+    const dateStr = String(event.workDate);
+    const departureIso = new Date(`${dateStr}T${input.departureTime}`).toISOString();
+    updateFields.clockOutAt = departureIso;
+    updateFields.clockOut = new Date(departureIso);
+  }
+
+  const [updated] = await fastify.db
+    .update(schema.employeeAttendance)
+    .set(updateFields)
+    .where(eq(schema.employeeAttendance.id, event.id))
+    .returning();
+
   return toPublicAttendanceEvent(updated);
+}
+
+const MAX_ACCURACY = 30;
+const MAX_AGE_MINUTES = 2;
+const FAILURE_RESULTS = new Set([
+  'OUTSIDE',
+  'STALE',
+  'LOW_ACCURACY',
+  'MOCKED',
+  'UNKNOWN',
+]);
+
+function isStale(timestamp: Date, now: Date): boolean {
+  return now.getTime() - timestamp.getTime() > MAX_AGE_MINUTES * 60 * 1000;
+}
+
+export function shouldRaiseOutsideAlert(
+  outsidePingCount: number,
+  monitoringAlertAt: Date | null | undefined
+): boolean {
+  return outsidePingCount > 3 && monitoringAlertAt == null;
+}
+
+export async function submitShiftLocationCheck(
+  fastify: FastifyInstance,
+  userId: string,
+  organizationId: string,
+  body: {
+    shiftAttendanceId?: string;
+    attendanceEventId?: string;
+    latitude: number;
+    longitude: number;
+    accuracyMeters: number;
+    isMock?: boolean;
+    timestamp?: string;
+    clientRequestId?: string;
+  }
+) {
+  const targetId = body.shiftAttendanceId || body.attendanceEventId;
+  if (!targetId) {
+    throw new AppError('shiftAttendanceId required', 400, 'SHIFT_ATTENDANCE_ID_REQUIRED');
+  }
+
+  const [event] = await fastify.db
+    .select()
+    .from(schema.employeeShiftAttendance)
+    .where(
+      and(
+        eq(schema.employeeShiftAttendance.id, targetId),
+        eq(schema.employeeShiftAttendance.organizationId, organizationId)
+      )
+    )
+    .limit(1);
+
+  if (!event) {
+    throw new AppError('Shift attendance event not found', 404, 'ATTENDANCE_EVENT_NOT_FOUND');
+  }
+
+  const profile = await findStaffProfile(fastify, userId, organizationId);
+  if (!profile || profile.id !== event.employeeId) {
+    throw new AppError('Forbidden', 403, 'FORBIDDEN');
+  }
+
+  if (!event.clockInAt) {
+    throw new AppError('Location monitoring can only start after clock-in.', 409, 'ATTENDANCE_NOT_CLOCKED_IN');
+  }
+
+  if (event.clockOutAt) {
+    throw new AppError('Location monitoring has stopped for this attendance.', 409, 'ATTENDANCE_ALREADY_CLOSED');
+  }
+
+  const [premises] = await fastify.db
+    .select()
+    .from(schema.premises)
+    .where(
+      and(
+        eq(schema.premises.id, event.premisesId),
+        eq(schema.premises.organizationId, organizationId)
+      )
+    )
+    .limit(1);
+
+  const checkedAt = new Date();
+  let result: (typeof schema.locationCheckResultEnum.enumValues)[number] = 'UNKNOWN';
+
+  if (body.isMock) {
+    result = 'MOCKED';
+  } else if (body.accuracyMeters > MAX_ACCURACY) {
+    result = 'LOW_ACCURACY';
+  } else if (premises) {
+    const evaluation = evaluateGeofence(
+      {
+        latitude: body.latitude,
+        longitude: body.longitude,
+        accuracyMeters: body.accuracyMeters,
+        isMocked: false,
+        capturedAt: checkedAt,
+      },
+      {
+        latitude: Number(premises.latitude),
+        longitude: Number(premises.longitude),
+        radiusMeters: Number(premises.radiusMeters ?? DEFAULT_GEOFENCE_RADIUS_METERS),
+      }
+    );
+    result = evaluation.result === 'IN_PREMISES' ? 'IN_PREMISES' : 'OUTSIDE';
+  }
+
+  try {
+    await fastify.db.insert(schema.attendanceLocationPings).values({
+      shiftAttendanceId: targetId,
+      overtimeAttendanceId: null,
+      checkedAt,
+      latitude: body.latitude.toFixed(7),
+      longitude: body.longitude.toFixed(7),
+      accuracyMeters: body.accuracyMeters.toFixed(2),
+      result,
+      clientRequestId: body.clientRequestId ?? null,
+    });
+  } catch (error) {
+    if (body.clientRequestId && (error as { code?: string })?.code === '23505') {
+      return { result, consecutiveFailures: event.consecutivePingFailures, exceptionCreated: false };
+    }
+    throw error;
+  }
+
+  const inside = result === 'IN_PREMISES';
+  const failure = FAILURE_RESULTS.has(result);
+
+  const [updated] = await fastify.db
+    .update(schema.employeeShiftAttendance)
+    .set({
+      insidePingCount: inside ? sql`${schema.employeeShiftAttendance.insidePingCount} + 1` : schema.employeeShiftAttendance.insidePingCount,
+      outsidePingCount: !inside ? sql`${schema.employeeShiftAttendance.outsidePingCount} + 1` : schema.employeeShiftAttendance.outsidePingCount,
+      consecutivePingFailures: failure ? sql`${schema.employeeShiftAttendance.consecutivePingFailures} + 1` : inside ? 0 : schema.employeeShiftAttendance.consecutivePingFailures,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.employeeShiftAttendance.id, targetId))
+    .returning();
+
+  return { result, consecutiveFailures: updated.consecutivePingFailures, exceptionCreated: false };
+}
+
+export async function submitOvertimeLocationCheck(
+  fastify: FastifyInstance,
+  userId: string,
+  organizationId: string,
+  body: {
+    overtimeAttendanceId?: string;
+    attendanceEventId?: string;
+    latitude: number;
+    longitude: number;
+    accuracyMeters: number;
+    isMock?: boolean;
+    timestamp?: string;
+    clientRequestId?: string;
+  }
+) {
+  const targetId = body.overtimeAttendanceId || body.attendanceEventId;
+  if (!targetId) {
+    throw new AppError('overtimeAttendanceId required', 400, 'OVERTIME_ATTENDANCE_ID_REQUIRED');
+  }
+
+  const [event] = await fastify.db
+    .select()
+    .from(schema.employeeOvertimeAttendance)
+    .where(
+      and(
+        eq(schema.employeeOvertimeAttendance.id, targetId),
+        eq(schema.employeeOvertimeAttendance.organizationId, organizationId)
+      )
+    )
+    .limit(1);
+
+  if (!event) {
+    throw new AppError('Overtime attendance event not found', 404, 'ATTENDANCE_EVENT_NOT_FOUND');
+  }
+
+  const profile = await findStaffProfile(fastify, userId, organizationId);
+  if (!profile || profile.id !== event.employeeId) {
+    throw new AppError('Forbidden', 403, 'FORBIDDEN');
+  }
+
+  if (!event.clockInAt) {
+    throw new AppError('Location monitoring can only start after clock-in.', 409, 'ATTENDANCE_NOT_CLOCKED_IN');
+  }
+
+  if (event.clockOutAt) {
+    throw new AppError('Location monitoring has stopped for this attendance.', 409, 'ATTENDANCE_ALREADY_CLOSED');
+  }
+
+  const [premises] = await fastify.db
+    .select()
+    .from(schema.premises)
+    .where(
+      and(
+        eq(schema.premises.id, event.premisesId),
+        eq(schema.premises.organizationId, organizationId)
+      )
+    )
+    .limit(1);
+
+  const checkedAt = new Date();
+  let result: (typeof schema.locationCheckResultEnum.enumValues)[number] = 'UNKNOWN';
+
+  if (body.isMock) {
+    result = 'MOCKED';
+  } else if (body.accuracyMeters > MAX_ACCURACY) {
+    result = 'LOW_ACCURACY';
+  } else if (premises) {
+    const evaluation = evaluateGeofence(
+      {
+        latitude: body.latitude,
+        longitude: body.longitude,
+        accuracyMeters: body.accuracyMeters,
+        isMocked: false,
+        capturedAt: checkedAt,
+      },
+      {
+        latitude: Number(premises.latitude),
+        longitude: Number(premises.longitude),
+        radiusMeters: Number(premises.radiusMeters ?? DEFAULT_GEOFENCE_RADIUS_METERS),
+      }
+    );
+    result = evaluation.result === 'IN_PREMISES' ? 'IN_PREMISES' : 'OUTSIDE';
+  }
+
+  try {
+    await fastify.db.insert(schema.attendanceLocationPings).values({
+      shiftAttendanceId: null,
+      overtimeAttendanceId: targetId,
+      checkedAt,
+      latitude: body.latitude.toFixed(7),
+      longitude: body.longitude.toFixed(7),
+      accuracyMeters: body.accuracyMeters.toFixed(2),
+      result,
+      clientRequestId: body.clientRequestId ?? null,
+    });
+  } catch (error) {
+    if (body.clientRequestId && (error as { code?: string })?.code === '23505') {
+      return { result, consecutiveFailures: event.consecutivePingFailures, exceptionCreated: false };
+    }
+    throw error;
+  }
+
+  const inside = result === 'IN_PREMISES';
+  const failure = FAILURE_RESULTS.has(result);
+
+  const [updated] = await fastify.db
+    .update(schema.employeeOvertimeAttendance)
+    .set({
+      insidePingCount: inside ? sql`${schema.employeeOvertimeAttendance.insidePingCount} + 1` : schema.employeeOvertimeAttendance.insidePingCount,
+      outsidePingCount: !inside ? sql`${schema.employeeOvertimeAttendance.outsidePingCount} + 1` : schema.employeeOvertimeAttendance.outsidePingCount,
+      consecutivePingFailures: failure ? sql`${schema.employeeOvertimeAttendance.consecutivePingFailures} + 1` : inside ? 0 : schema.employeeOvertimeAttendance.consecutivePingFailures,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.employeeOvertimeAttendance.id, targetId))
+    .returning();
+
+  return { result, consecutiveFailures: updated.consecutivePingFailures, exceptionCreated: false };
 }
 
 export { enumerateDates };

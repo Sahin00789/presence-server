@@ -57,6 +57,13 @@
       "when": 1793886983036,
       "tag": "0007_known_shinobi_shaw",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794207127431,
+      "tag": "0008_giant_karen_page",
+      "breakpoints": true
     }
   ]
 }

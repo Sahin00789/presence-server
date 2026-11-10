@@ -101,3 +101,28 @@ export const reconcileRequestSchema = z.object({
   staffProfileId: z.string().uuid().optional(),
 });
 
+export const unworkedPaymentRuleSchema = z.object({
+  id: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  premisesId: z.string().uuid().nullable().optional(),
+  employeeId: z.string().uuid().nullable().optional(),
+  dayType: z.enum(['HOLIDAY', 'WEEKLY_OFF']),
+  paymentInr: z.number().int().nonnegative(),
+  createdAt: z.date().or(z.string()).optional(),
+});
+
+export const createUnworkedPaymentRuleSchema = z.object({
+  employeeId: z.string().uuid().optional().nullable(),
+  premisesId: z.string().uuid().optional().nullable(),
+  dayType: z.enum(['HOLIDAY', 'WEEKLY_OFF']),
+  paymentInr: z.number().int().nonnegative().optional(),
+  paymentCents: z.number().int().nonnegative().optional(),
+});
+
+export const unworkedRulesQuerySchema = z.object({
+  employeeId: z.string().uuid().optional(),
+  premisesId: z.string().uuid().optional(),
+  onDate: z.string().optional(),
+});
+
+

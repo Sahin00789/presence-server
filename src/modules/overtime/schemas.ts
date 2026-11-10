@@ -1,9 +1,7 @@
 import { z } from 'zod';
 
 export const overtimeStatusSchema = z.enum([
-  'REQUESTED',
-  'APPROVED',
-  'REJECTED',
+  'CREATED',
   'IN_PROGRESS',
   'COMPLETED',
   'CANCELLED',

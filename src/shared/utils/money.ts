@@ -64,12 +64,10 @@ export function toMajorUnits(amountPaise: number): number {
  * for legacy fields; the Android client performs its own locale-aware formatting.
  */
 export function formatMinorUnits(amountPaise: number, currency: CurrencyCode = 'INR'): string {
-  const symbol = CURRENCY_SYMBOLS[currency.toUpperCase()] ?? `${currency.toUpperCase()} `;
+  const symbol = '₹';
   const sign = amountPaise < 0 ? '-' : '';
   const absolute = Math.abs(amountPaise);
-  const major = divideHalfUp(absolute, 100);
-  const minor = absolute % 100;
-  return `${sign}${symbol}${major.toLocaleString('en-IN')}.${String(minor).padStart(2, '0')}`;
+  return `${sign}${symbol}${absolute}`;
 }
 
 /**

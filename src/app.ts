@@ -17,12 +17,12 @@ import { premisesRoutes } from './modules/premises/routes.js';
 import { shiftRoutes } from './modules/shifts/routes.js';
 import { holidayRoutes } from './modules/holidays/routes.js';
 import { attendanceRoutes } from './modules/attendance/routes.js';
-import { locationRoutes } from './modules/location/routes.js';
 import { payrollRoutes } from './modules/payroll/routes.js';
 import { overtimeRoutes } from './modules/overtime/routes.js';
 import { biometricsRoutes } from './modules/biometrics/routes.js';
 import { leaveRoutes } from './modules/leave/routes.js';
 import { reportRoutes } from './modules/reports/routes.js';
+import { locationRoutes } from './modules/location/routes.js';
 import { startLeaveEarningsJob } from './jobs/leaveEarnings.js';
 import { startHolidayWeeklyOffEarningsJob } from './jobs/holidayWeeklyOffEarnings.js';
 import { startMonthlyReportMailerJob } from './jobs/monthlyReportMailer.js';
@@ -73,12 +73,12 @@ export function buildApp() {
   app.register(shiftRoutes);
   app.register(holidayRoutes);
   app.register(attendanceRoutes);
-  app.register(locationRoutes);
   app.register(payrollRoutes);
   app.register(overtimeRoutes);
   app.register(biometricsRoutes);
   app.register(leaveRoutes);
   app.register(reportRoutes);
+  app.register(locationRoutes);
 
   // Background attendance finalization, leave earnings, holiday/weekly-off earnings, and monthly report mailer.
   startLeaveEarningsJob(app);

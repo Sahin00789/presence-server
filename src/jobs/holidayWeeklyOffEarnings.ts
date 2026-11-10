@@ -92,6 +92,7 @@ export async function postHolidayAndWeeklyOffEarnings(
   const activeAssignments = await fastify.db
     .select({
       employeeId: schema.employeeShiftAssignments.employeeId,
+      shiftId: schema.employeeShiftAssignments.shiftId,
       createdAt: schema.employeeShiftAssignments.createdAt,
     })
     .from(schema.employeeShiftAssignments)
@@ -104,6 +105,48 @@ export async function postHolidayAndWeeklyOffEarnings(
       empAssignmentStartDateMap.set(a.employeeId, toDateISO(a.createdAt));
     }
   }
+
+  // Fetch all active shift templates to check which weekdays have assigned shifts
+  const allShifts = await fastify.db
+    .select({
+      id: schema.shifts.id,
+      dayName: schema.shifts.dayName,
+    })
+    .from(schema.shifts);
+  const shiftById = new Map(allShifts.map((s) => [s.id, s]));
+
+  const dayNameMap: Record<string, number> = {
+    Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6
+  };
+  const assignedDowSet = new Set<string>();
+  for (const a of activeAssignments) {
+    const template = shiftById.get(a.shiftId);
+    if (!template) continue;
+    if (template.dayName && dayNameMap[template.dayName] !== undefined) {
+      assignedDowSet.add(`${a.employeeId}::${dayNameMap[template.dayName]}`);
+    }
+  }
+
+  // Fetch attendance records to avoid granting unworked off-day pay on days the employee worked
+  const attendanceRecords = await fastify.db
+    .select({
+      employeeId: schema.employeeAttendance.employeeId,
+      workDate: schema.employeeAttendance.workDate,
+      status: schema.employeeAttendance.status,
+    })
+    .from(schema.employeeAttendance)
+    .where(
+      and(
+        gte(schema.employeeAttendance.workDate, from),
+        lte(schema.employeeAttendance.workDate, to)
+      )
+    );
+
+  const workedSet = new Set(
+    attendanceRecords
+      .filter((r) => r.status === 'PRESENT' || r.status === 'HALF_DAY')
+      .map((r) => `${r.employeeId}::${String(r.workDate)}`)
+  );
 
   const dates = enumerateDates(from, to);
   for (const date of dates) {
@@ -145,9 +188,14 @@ export async function postHolidayAndWeeklyOffEarnings(
           earningDate: date,
           type: 'HOLIDAY',
           amount: String(amt),
-          sourceReference: `holiday:${holiday.id}:${emp.employeeId}:${date}`,
+          sourceReference: `holiday:${holiday.id}:HOLIDAY`,
         } as any);
         holidays += 1;
+        continue;
+      }
+
+      // Check if employee has a shift assigned on this weekday or worked on this date
+      if (assignedDowSet.has(`${emp.employeeId}::${dow}`) || workedSet.has(`${emp.employeeId}::${date}`)) {
         continue;
       }
 
@@ -175,7 +223,7 @@ export async function postHolidayAndWeeklyOffEarnings(
           earningDate: date,
           type: 'OFF_DAY',
           amount: String(amt),
-          sourceReference: `weeklyoff:${emp.employeeId}:${date}`,
+          sourceReference: `weekly-off:${emp.employeeId}:${date}:OFF_DAY`,
         } as any);
         weeklyOffs += 1;
       }

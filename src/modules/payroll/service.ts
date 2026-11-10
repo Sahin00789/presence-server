@@ -95,7 +95,7 @@ export async function getMonthlyAttendanceStats(
           eq(schema.overtime.employeeId, staff.id),
           gte(schema.overtime.workDate, startDate),
           sql`${schema.overtime.workDate} < ${nextMonthStartDate}`,
-          inArray(schema.overtime.status, ['APPROVED', 'IN_PROGRESS', 'COMPLETED'])
+          inArray(schema.overtime.status, ['CREATED', 'IN_PROGRESS', 'COMPLETED'])
         )
       );
     const overtimeCount = overtimeRecords.length;
@@ -161,6 +161,7 @@ export async function generateDailyEarningLedgerEntries(
   if (!activeAssignment) return;
 
   const assignmentStartDate = toDateISO(activeAssignment.createdAt);
+  const currentDate = toDateISO(new Date());
 
   try {
     const salary = await getCurrentSalaryStructure(
@@ -171,6 +172,21 @@ export async function generateDailyEarningLedgerEntries(
     ).catch(() => null);
     const dailyPresentCents = salary?.presentCents ?? 0;
     const fallbackDailyCents = Number(dailyPresentCents) > 0 ? Number(dailyPresentCents) : 0;
+
+    // Purge any unworked holiday or weekly off-day earnings outside [assignmentStartDate, currentDate]
+    const earningLedger = schema.employeeEarningLedger;
+    await fastify.db
+      .delete(earningLedger)
+      .where(
+        and(
+          eq(earningLedger.employeeId, staffProfileId),
+          eq(earningLedger.organizationId, organizationId),
+          gte(earningLedger.earningDate, startDate),
+          sql`${earningLedger.earningDate} < ${nextMonthStartDate}`,
+          inArray(earningLedger.type, ['HOLIDAY', 'OFF_DAY']),
+          sql`(${earningLedger.earningDate} < ${assignmentStartDate} OR ${earningLedger.earningDate} > ${currentDate})`
+        )
+      );
 
     // 1. Attendance events -> SHIFT earnings. Clock-out already writes the
     // authoritative SHIFT row; this pass backfills approved leave and repairs
@@ -211,7 +227,6 @@ export async function generateDailyEarningLedgerEntries(
 
     // Load every ledger row already booked for this employee in the month
     // once, instead of issuing a SELECT per candidate day/weekly-off/holiday.
-    const earningLedger = schema.employeeEarningLedger;
     const existingLedgerRows = await fastify.db
       .select({
         sourceReference: earningLedger.sourceReference,
@@ -257,7 +272,7 @@ export async function generateDailyEarningLedgerEntries(
       overtimeId?: string | null;
       sourceReference: string;
     }) => {
-      if (values.earningDate < assignmentStartDate) return;
+      if (values.earningDate < assignmentStartDate || values.earningDate > currentDate) return;
       const attendanceKey = values.attendanceId ? `${values.attendanceId}:${values.type}` : null;
       if (values.overtimeId && seenOvertimeEntries.has(values.overtimeId)) return;
       if (seenSourceReferences.has(values.sourceReference)) return;
@@ -393,6 +408,8 @@ export async function generateDailyEarningLedgerEntries(
 
     for (const date of enumerateDates(startDate, lastDayOfMonth)) {
       if (
+        date < assignmentStartDate ||
+        date > currentDate ||
         !weeklyOffDays.has(dayOfWeek(date)) ||
         holidayDates.has(date) ||
         workedDates.has(date)
@@ -447,7 +464,7 @@ export async function generateDailyEarningLedgerEntries(
           eq(schema.overtime.employeeId, staffProfileId),
           gte(schema.overtime.workDate, startDate),
           sql`${schema.overtime.workDate} < ${nextMonthStartDate}`,
-          inArray(schema.overtime.status, ['APPROVED', 'IN_PROGRESS', 'COMPLETED'])
+          inArray(schema.overtime.status, ['CREATED', 'IN_PROGRESS', 'COMPLETED'])
         )
       );
 
@@ -636,6 +653,7 @@ export async function getDailyEarningLedger(
   month: number,
   year: number
 ) {
+  const todayIso = new Date().toISOString().split('T')[0]!;
   const { startDate, nextMonthStartDate } = getMonthDateRange(year, month);
   const earningLedger = schema.employeeEarningLedger;
   return await fastify.db
@@ -646,7 +664,8 @@ export async function getDailyEarningLedger(
         eq(earningLedger.organizationId, organizationId),
         eq(earningLedger.employeeId, staffProfileId),
         gte(earningLedger.earningDate, startDate),
-        sql`${earningLedger.earningDate} < ${nextMonthStartDate}`
+        sql`${earningLedger.earningDate} < ${nextMonthStartDate}`,
+        lte(earningLedger.earningDate, todayIso)
       )
     )
     .orderBy(desc(earningLedger.earningDate));
@@ -1041,7 +1060,8 @@ export function calculateSalary(params: SalaryCalculationInput) {
   if (hasShiftRules) {
     basePay =
       presentDays * (rulePresent?.paymentCents ?? baseRateCents) +
-      halfDays * (ruleHalfDay?.paymentCents ?? Math.round(baseRateCents / 2));
+      halfDays * (ruleHalfDay?.paymentCents ?? Math.round(baseRateCents / 2)) +
+      absentDays * (ruleAbsent?.paymentCents ?? 0);
 
     push('BASE_SALARY', 'Shift attendance payments', basePay);
   } else if (compensationType === 'MONTHLY') {
@@ -1144,11 +1164,14 @@ export function calculateDailyAccrual(params: {
     periodStartDate,
   } = params;
 
+  const directShiftRule = pickRule(shiftPaymentRules, 'attendanceStatus', status);
+
   if (status === 'ABSENT') {
+    if (directShiftRule?.paymentCents != null) {
+      return directShiftRule.paymentCents;
+    }
     return 0;
   }
-
-  const directShiftRule = pickRule(shiftPaymentRules, 'attendanceStatus', status);
 
   const fraction = status === 'HALF_DAY' ? 0.5 : 1;
   const dailyRate = Math.round(baseRateCents / Math.max(1, daysInMonth(periodStartDate)));
@@ -1249,20 +1272,24 @@ export async function getUnworkedPaymentRules(
   employeeId?: string,
   onDate?: string
 ) {
+  const conditions = [eq(schema.unworkedPaymentRules.organizationId, organizationId)];
+
+  if (employeeId) {
+    conditions.push(
+      sql`(${schema.unworkedPaymentRules.employeeId} = ${employeeId} OR ${schema.unworkedPaymentRules.employeeId} IS NULL)`
+    );
+  }
+
   const rows = await fastify.db
     .select()
     .from(schema.unworkedPaymentRules)
-    .where(
-      and(
-        eq(schema.unworkedPaymentRules.organizationId, organizationId),
-        employeeId
-          ? sql`(${schema.unworkedPaymentRules.employeeId} = ${employeeId} OR ${schema.unworkedPaymentRules.employeeId} IS NULL)`
-          : sql`${schema.unworkedPaymentRules.employeeId} IS NULL`
-      )
-    )
+    .where(and(...conditions))
     .orderBy(desc(schema.unworkedPaymentRules.createdAt));
 
-  return rows;
+  return rows.map((r) => ({
+    ...r,
+    paymentInr: Number(r.paymentInr ?? 0),
+  }));
 }
 
 export async function createShiftPaymentRule(
@@ -1369,19 +1396,54 @@ export async function createUnworkedPaymentRule(
     }
   }
 
-  const [created] = await fastify.db
-    .insert(schema.unworkedPaymentRules)
-    .values({
-      organizationId,
-      premisesId: input.premisesId ?? null,
-      employeeId: input.employeeId ?? null,
-      dayType: input.dayType,
-      paymentInr: input.paymentInr ?? input.paymentCents ?? 0,
-      multiplierBasisPoints: input.multiplierBasisPoints ?? 15000,
-    })
-    .returning();
+  const paymentAmount = input.paymentInr ?? input.paymentCents ?? 0;
 
-  return created;
+  // Check for an existing rule for same organization, employee, and dayType
+  const existingConditions = [
+    eq(schema.unworkedPaymentRules.organizationId, organizationId),
+    eq(schema.unworkedPaymentRules.dayType, input.dayType),
+  ];
+  if (input.employeeId) {
+    existingConditions.push(eq(schema.unworkedPaymentRules.employeeId, input.employeeId));
+  } else {
+    existingConditions.push(sql`${schema.unworkedPaymentRules.employeeId} IS NULL`);
+  }
+
+  const [existing] = await fastify.db
+    .select()
+    .from(schema.unworkedPaymentRules)
+    .where(and(...existingConditions))
+    .limit(1);
+
+  let resultRule;
+  if (existing) {
+    const [updated] = await fastify.db
+      .update(schema.unworkedPaymentRules)
+      .set({
+        paymentInr: paymentAmount,
+        premisesId: input.premisesId ?? existing.premisesId,
+      })
+      .where(eq(schema.unworkedPaymentRules.id, existing.id))
+      .returning();
+    resultRule = updated;
+  } else {
+    const [created] = await fastify.db
+      .insert(schema.unworkedPaymentRules)
+      .values({
+        organizationId,
+        premisesId: input.premisesId ?? null,
+        employeeId: input.employeeId ?? null,
+        dayType: input.dayType,
+        paymentInr: paymentAmount,
+      })
+      .returning();
+    resultRule = created;
+  }
+
+  return {
+    ...resultRule,
+    paymentInr: Number(resultRule.paymentInr ?? 0),
+  };
 }
 
 export async function getMyMonthlyEarningLedger(
@@ -1474,7 +1536,7 @@ export async function getMyMonthlyEarningLedger(
     breakdown: r.breakdown ?? { earnings: [] },
     dailyTotals,
     entries: rawEntries.map((e: any) => {
-      const paise = Math.round(Number(e.amount) || 0);
+      const paise = Math.round((Number(e.amount) || 0) * 100);
       return {
         id: e.id,
         organizationId: e.organizationId,

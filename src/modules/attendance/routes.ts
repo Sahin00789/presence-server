@@ -5,16 +5,25 @@ import {
   attendanceRecordSchema,
   attendanceRecordsQuerySchema,
   clockInSchema,
-  correctDailyAttendanceSchema,
   dailyAttendanceSchema,
+  locationCheckResponseSchema,
+  manualMarkOvertimeSchema,
+  manualMarkShiftSchema,
+  overtimeLocationPingSchema,
+  shiftLocationPingSchema,
 } from './schemas.js';
 import {
-  clockIn,
+  clockInOvertime,
+  clockInShift,
+  correctOvertimeAttendance,
+  correctShiftAttendance,
   getDailyAttendanceByDateAndPremises,
   getEmployeeAttendanceAndEarningsHistory,
+  getNextUpcomingAttendance,
   getUpcomingAttendance,
   listAttendanceRecords,
-  manualMarkAttendance,
+  submitOvertimeLocationCheck,
+  submitShiftLocationCheck,
   toPublicAttendanceEvent,
 } from './service.js';
 import { z } from 'zod';
@@ -22,12 +31,13 @@ import { z } from 'zod';
 export async function attendanceRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
+  // Shift Clock-In Route
   server.post(
-    '/api/v1/attendance/clock-in',
+    '/api/v1/attendance/shift/clock-in',
     {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
       schema: {
-        description: 'Clock in with location and face verification',
+        description: 'Clock in for assigned shift with location and face verification',
         tags: ['Attendance'],
         body: clockInSchema,
         response: {
@@ -36,7 +46,7 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const result = await clockIn(
+      const result = await clockInShift(
         fastify,
         request.user.userId,
         request.user.organizationId,
@@ -46,35 +56,69 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
     }
   );
 
+  // Overtime Clock-In Route
   server.post(
-    '/api/v1/attendance/manual-mark',
+    '/api/v1/attendance/overtime/clock-in',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
       schema: {
-        description: 'Manual mark attendance for shift/overtime (ABSENT/HALF_DAY/LEAVE or delete overtime). Available after clock-in and before shift/overtime ends.',
+        description: 'Clock in for scheduled overtime with location and face verification',
         tags: ['Attendance'],
-        body: z.object({
-          attendanceEventId: z.string().uuid().optional(),
-          employeeId: z.string().uuid().optional(),
-          workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-          overtimeId: z.string().uuid().optional(),
-          action: z.enum(['ABSENT', 'HALF_DAY', 'LEAVE', 'DELETE_OVERTIME']),
-          reason: z.string().min(3).max(500).optional(),
-        }),
+        body: clockInSchema,
         response: {
-          200: attendanceEventSchema.or(z.object({ deleted: z.boolean(), overtimeId: z.string().uuid() })),
+          200: attendanceEventSchema,
         },
       },
     },
     async (request, reply) => {
-      const result = await manualMarkAttendance(
+      const result = await clockInOvertime(
         fastify,
-        request.user.organizationId,
         request.user.userId,
-        request.body as any
+        request.user.organizationId,
+        request.body
       );
-      return reply.send(result as any);
+      return reply.send(toPublicAttendanceEvent(result));
     }
+  );
+
+  const handleShiftCorrection = async (request: any, reply: any) => {
+    const result = await correctShiftAttendance(
+      fastify,
+      request.user.organizationId,
+      request.user.userId,
+      request.body as any
+    );
+    return reply.send(result as any);
+  };
+
+  const handleOvertimeCorrection = async (request: any, reply: any) => {
+    const result = await correctOvertimeAttendance(
+      fastify,
+      request.user.organizationId,
+      request.user.userId,
+      request.body as any
+    );
+    return reply.send(result as any);
+  };
+
+  // 1. Shift Attendance Manual Mark
+  server.post(
+    '/api/v1/attendance/shift/manual-mark',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: { body: manualMarkShiftSchema },
+    },
+    handleShiftCorrection
+  );
+
+  // 2. Overtime Attendance Manual Mark
+  server.post(
+    '/api/v1/attendance/overtime/manual-mark',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: { body: manualMarkOvertimeSchema },
+    },
+    handleOvertimeCorrection
   );
 
   server.get(
@@ -184,6 +228,58 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
     async (request, reply) => {
       const { date } = request.query as { date?: string };
       const result = await getUpcomingAttendance(fastify, request.user.organizationId, request.user.userId, date);
+      return reply.send(result as any);
+    }
+  );
+
+  server.get(
+    '/api/v1/attendance/next-upcoming',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
+    },
+    async (request, reply) => {
+      const result = await getNextUpcomingAttendance(fastify, request.user.organizationId, request.user.userId);
+      return reply.send(result as any);
+    }
+  );
+
+  // Location Ping Routes
+  server.post(
+    '/api/v1/attendance/shift/location-ping',
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        body: shiftLocationPingSchema,
+        response: { 200: locationCheckResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const result = await submitShiftLocationCheck(
+        fastify,
+        request.user.userId,
+        request.user.organizationId,
+        request.body as any
+      );
+      return reply.send(result as any);
+    }
+  );
+
+  server.post(
+    '/api/v1/attendance/overtime/location-ping',
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        body: overtimeLocationPingSchema,
+        response: { 200: locationCheckResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const result = await submitOvertimeLocationCheck(
+        fastify,
+        request.user.userId,
+        request.user.organizationId,
+        request.body as any
+      );
       return reply.send(result as any);
     }
   );

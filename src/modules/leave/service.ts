@@ -572,11 +572,8 @@ export async function reviewLeaveRequest(
             premisesId: row.leave.premisesId,
             employeeId: row.leave.employeeId,
             shiftAssignmentId: row.leave.shiftAssignmentId,
-            attendanceType: 'SHIFT',
             workDate: row.leave.workDate,
             status: 'LEAVE',
-            scheduledMinutes,
-            workedMinutes: 0,
             statusUpdatedBy: actorUserId,
             remarks: `Leave approved: ${row.leave.reason}`,
           })
@@ -587,7 +584,6 @@ export async function reviewLeaveRequest(
           .update(schema.employeeAttendance)
           .set({
             status: 'LEAVE',
-            scheduledMinutes,
             statusUpdatedBy: actorUserId,
             remarks: `Leave approved: ${row.leave.reason}`,
             updatedAt: new Date(),

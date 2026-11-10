@@ -100,11 +100,8 @@ export async function postLeaveEarnings(
               premisesId: assignment.premisesId,
               employeeId: assignment.employeeId,
               shiftAssignmentId: assignment.assignmentId,
-              attendanceType: 'SHIFT',
               workDate: date,
               status: 'LEAVE',
-              scheduledMinutes,
-              workedMinutes: 0,
               remarks: `Leave approved: ${approvedLeave.reason}`,
             })
             .returning();
@@ -114,7 +111,6 @@ export async function postLeaveEarnings(
             .update(schema.employeeAttendance)
             .set({
               status: 'LEAVE',
-              scheduledMinutes,
               remarks: `Leave approved: ${approvedLeave.reason}`,
               updatedAt: new Date(),
             })
@@ -157,17 +153,14 @@ export async function postLeaveEarnings(
               premisesId: assignment.premisesId,
               employeeId: assignment.employeeId,
               shiftAssignmentId: assignment.assignmentId,
-              attendanceType: 'SHIFT',
               workDate: date,
               status: 'ABSENT',
-              scheduledMinutes,
-              workedMinutes: 0,
               remarks: 'Auto-marked absent: Shift ended with no clock-in',
             })
             .returning();
 
           const absentPay = Number(assignment.absentPay ?? 0);
-          if (absentPay > 0) {
+          if (absentPay !== 0) {
             await fastify.db.insert(schema.employeeEarningLedger).values({
               organizationId: assignment.organizationId,
               premisesId: assignment.premisesId,
@@ -186,7 +179,6 @@ export async function postLeaveEarnings(
             .update(schema.employeeAttendance)
             .set({
               status: 'ABSENT',
-              scheduledMinutes,
               remarks: 'Auto-marked absent: Shift ended with no clock-in',
               updatedAt: new Date(),
             })
