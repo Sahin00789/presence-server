@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { ZodTypeProvider } from 'fastify-type-provider-zod';
+import { z } from 'zod';
 import {
   attendanceEventSchema,
   attendanceRecordSchema,
@@ -20,13 +21,14 @@ import {
   getDailyAttendanceByDateAndPremises,
   getEmployeeAttendanceAndEarningsHistory,
   getNextUpcomingAttendance,
+  getOvertimeLocationPings,
+  getShiftLocationPings,
   getUpcomingAttendance,
   listAttendanceRecords,
   submitOvertimeLocationCheck,
   submitShiftLocationCheck,
   toPublicAttendanceEvent,
 } from './service.js';
-import { z } from 'zod';
 
 export async function attendanceRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
@@ -81,26 +83,6 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
     }
   );
 
-  const handleShiftCorrection = async (request: any, reply: any) => {
-    const result = await correctShiftAttendance(
-      fastify,
-      request.user.organizationId,
-      request.user.userId,
-      request.body as any
-    );
-    return reply.send(result as any);
-  };
-
-  const handleOvertimeCorrection = async (request: any, reply: any) => {
-    const result = await correctOvertimeAttendance(
-      fastify,
-      request.user.organizationId,
-      request.user.userId,
-      request.body as any
-    );
-    return reply.send(result as any);
-  };
-
   // 1. Shift Attendance Manual Mark
   server.post(
     '/api/v1/attendance/shift/manual-mark',
@@ -108,7 +90,15 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: { body: manualMarkShiftSchema },
     },
-    handleShiftCorrection
+    async (request, reply) => {
+      const result = await correctShiftAttendance(
+        fastify,
+        request.user.organizationId,
+        request.user.userId,
+        request.body as any
+      );
+      return reply.send(result as any);
+    }
   );
 
   // 2. Overtime Attendance Manual Mark
@@ -118,9 +108,18 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: { body: manualMarkOvertimeSchema },
     },
-    handleOvertimeCorrection
+    async (request, reply) => {
+      const result = await correctOvertimeAttendance(
+        fastify,
+        request.user.organizationId,
+        request.user.userId,
+        request.body as any
+      );
+      return reply.send(result as any);
+    }
   );
 
+  // 3. Attendance Records (General)
   server.get(
     '/api/v1/attendance/records',
     {
@@ -130,9 +129,7 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
           'List attendance events. Employees receive their own records, Owners receive the whole organization.',
         tags: ['Attendance'],
         querystring: attendanceRecordsQuerySchema,
-        response: {
-          200: z.array(attendanceRecordSchema),
-        },
+        response: { 200: z.array(attendanceRecordSchema) },
       },
     },
     async (request, reply) => {
@@ -140,12 +137,36 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
         fastify,
         request.user,
         request.user.organizationId,
-        request.query as { from?: string; to?: string; staffProfileId?: string; limit?: number; offset?: number }
+        request.query as any
       );
       return reply.send(result);
     }
   );
 
+  // 4. All Attendance Records (OWNER)
+  server.get(
+    '/api/v1/attendance/all',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: {
+        description: 'List all attendance records for organization (Owner)',
+        tags: ['Attendance'],
+        querystring: attendanceRecordsQuerySchema,
+        response: { 200: z.array(attendanceRecordSchema) },
+      },
+    },
+    async (request, reply) => {
+      const result = await listAttendanceRecords(
+        fastify,
+        { userId: request.user.userId, role: 'OWNER' },
+        request.user.organizationId,
+        request.query as any
+      );
+      return reply.send(result);
+    }
+  );
+
+  // 5. Daily Attendance (OWNER)
   server.get(
     '/api/v1/attendance/daily',
     {
@@ -157,9 +178,7 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
           workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
           premisesId: z.string().uuid().optional(),
         }),
-        response: {
-          200: z.array(dailyAttendanceSchema),
-        },
+        response: { 200: z.array(dailyAttendanceSchema) },
       },
     },
     async (request, reply) => {
@@ -174,6 +193,7 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
     }
   );
 
+  // 6. My Attendance History (EMPLOYEE)
   server.get(
     '/api/v1/attendance/my-history',
     {
@@ -190,29 +210,51 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const { from, to, month, year } = request.query as { from?: string; to?: string; month?: string; year?: number };
-      let f = from;
-      let t = to;
-      if (month && !f && !t) {
-        const [y, m] = month.split('-').map((v) => parseInt(v));
-        f = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-01`;
-        const last = new Date(y, m, 0).getDate();
-        t = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(last).padStart(2, '0')}`;
-      } else if (year && !month && !f && !t) {
-        f = `${year}-01-01`;
-        t = `${year}-12-31`;
-      }
+      const q = request.query as { from?: string; to?: string; month?: string; year?: number };
       const result = await getEmployeeAttendanceAndEarningsHistory(
         fastify,
         request.user.organizationId,
         request.user.userId,
-        f,
-        t
+        q.from,
+        q.to,
+        q.month,
+        q.year
       );
       return reply.send(result as any);
     }
   );
 
+  server.get(
+    '/api/v1/attendance/my',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE', 'OWNER')],
+      schema: {
+        description: 'Retrieve my attendance history',
+        tags: ['Attendance'],
+        querystring: z.object({
+          from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          month: z.string().regex(/^\d{4}-\d{2}$/).optional(),
+          year: z.coerce.number().optional(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const q = request.query as { from?: string; to?: string; month?: string; year?: number };
+      const result = await getEmployeeAttendanceAndEarningsHistory(
+        fastify,
+        request.user.organizationId,
+        request.user.userId,
+        q.from,
+        q.to,
+        q.month,
+        q.year
+      );
+      return reply.send(result as any);
+    }
+  );
+
+  // 7. Upcoming Attendance
   server.get(
     '/api/v1/attendance/upcoming',
     {
@@ -243,44 +285,93 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
     }
   );
 
-  // Location Ping Routes
-  server.post(
-    '/api/v1/attendance/shift/location-ping',
-    {
-      preHandler: [fastify.authenticate],
-      schema: {
-        body: shiftLocationPingSchema,
-        response: { 200: locationCheckResponseSchema },
-      },
-    },
-    async (request, reply) => {
-      const result = await submitShiftLocationCheck(
-        fastify,
-        request.user.userId,
-        request.user.organizationId,
-        request.body as any
-      );
-      return reply.send(result as any);
-    }
-  );
+  // Shift Location Ping Handler
+  const shiftPingHandler = async (request: any, reply: any) => {
+    const result = await submitShiftLocationCheck(
+      fastify,
+      request.user.userId,
+      request.user.organizationId,
+      request.body as any
+    );
+    return reply.send(result as any);
+  };
 
-  server.post(
-    '/api/v1/attendance/overtime/location-ping',
-    {
-      preHandler: [fastify.authenticate],
-      schema: {
-        body: overtimeLocationPingSchema,
-        response: { 200: locationCheckResponseSchema },
-      },
-    },
-    async (request, reply) => {
-      const result = await submitOvertimeLocationCheck(
-        fastify,
-        request.user.userId,
-        request.user.organizationId,
-        request.body as any
-      );
-      return reply.send(result as any);
-    }
-  );
+  const shiftPingSchema = {
+    description: 'Submit a periodic GPS location ping for active shift attendance',
+    tags: ['Location', 'Attendance'],
+    body: shiftLocationPingSchema,
+    response: { 200: locationCheckResponseSchema },
+  };
+
+  server.post('/api/v1/attendance/shift/location-ping', { preHandler: [fastify.authenticate], schema: shiftPingSchema }, shiftPingHandler);
+  server.post('/api/v1/location/shift/ping', { preHandler: [fastify.authenticate], schema: shiftPingSchema }, shiftPingHandler);
+  server.post('/api/v1/location/shift/location-ping', { preHandler: [fastify.authenticate], schema: shiftPingSchema }, shiftPingHandler);
+
+  // Overtime Location Ping Handler
+  const overtimePingHandler = async (request: any, reply: any) => {
+    const result = await submitOvertimeLocationCheck(
+      fastify,
+      request.user.userId,
+      request.user.organizationId,
+      request.body as any
+    );
+    return reply.send(result as any);
+  };
+
+  const overtimePingSchema = {
+    description: 'Submit a periodic GPS location ping for active overtime attendance',
+    tags: ['Location', 'Attendance'],
+    body: overtimeLocationPingSchema,
+    response: { 200: locationCheckResponseSchema },
+  };
+
+  server.post('/api/v1/attendance/overtime/location-ping', { preHandler: [fastify.authenticate], schema: overtimePingSchema }, overtimePingHandler);
+  server.post('/api/v1/location/overtime/ping', { preHandler: [fastify.authenticate], schema: overtimePingSchema }, overtimePingHandler);
+  server.post('/api/v1/location/overtime/location-ping', { preHandler: [fastify.authenticate], schema: overtimePingSchema }, overtimePingHandler);
+
+  // Shift Location Pings List
+  const shiftPingsListHandler = async (request: any, reply: any) => {
+    const { shiftAttendanceId } = request.query as { shiftAttendanceId: string };
+    const result = await getShiftLocationPings(
+      fastify,
+      request.user.organizationId,
+      shiftAttendanceId
+    );
+    return reply.send(result);
+  };
+
+  const shiftPingsListSchema = {
+    description: 'Get list of location pings recorded for a shift attendance event',
+    tags: ['Location', 'Attendance'],
+    querystring: z.object({
+      shiftAttendanceId: z.string(),
+    }),
+  };
+
+  server.get('/api/v1/attendance/shift/location-pings', { preHandler: [fastify.authenticate], schema: shiftPingsListSchema }, shiftPingsListHandler);
+  server.get('/api/v1/location/shift/pings', { preHandler: [fastify.authenticate], schema: shiftPingsListSchema }, shiftPingsListHandler);
+  server.get('/api/v1/location/shift/location-pings', { preHandler: [fastify.authenticate], schema: shiftPingsListSchema }, shiftPingsListHandler);
+
+  // Overtime Location Pings List
+  const overtimePingsListHandler = async (request: any, reply: any) => {
+    const { overtimeAttendanceId } = request.query as { overtimeAttendanceId: string };
+    const result = await getOvertimeLocationPings(
+      fastify,
+      request.user.organizationId,
+      overtimeAttendanceId
+    );
+    return reply.send(result);
+  };
+
+  const overtimePingsListSchema = {
+    description: 'Get list of location pings recorded for an overtime attendance event',
+    tags: ['Location', 'Attendance'],
+    querystring: z.object({
+      overtimeAttendanceId: z.string(),
+    }),
+  };
+
+  server.get('/api/v1/attendance/overtime/location-pings', { preHandler: [fastify.authenticate], schema: overtimePingsListSchema }, overtimePingsListHandler);
+  server.get('/api/v1/location/overtime/pings', { preHandler: [fastify.authenticate], schema: overtimePingsListSchema }, overtimePingsListHandler);
+  server.get('/api/v1/location/overtime/location-pings', { preHandler: [fastify.authenticate], schema: overtimePingsListSchema }, overtimePingsListHandler);
 }

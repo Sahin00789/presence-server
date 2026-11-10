@@ -63,6 +63,14 @@ export const updateEmployeeSchema = z.object({
   avatarUrl: z.string().nullable().optional(),
 });
 
+export const uploadEmployeePhotoSchema = z.object({
+  photoBase64: z.string().optional(),
+  photoUrl: z.string().optional(),
+  avatarBase64: z.string().optional(),
+  avatarUrl: z.string().optional(),
+});
+
 export type CreateEmployeeInput = z.infer<typeof createEmployeeSchema>;
 export type UpdateEmployeeInput = z.infer<typeof updateEmployeeSchema>;
 export type EmployeeDto = z.infer<typeof employeeDtoSchema>;
+export type UploadEmployeePhotoInput = z.infer<typeof uploadEmployeePhotoSchema>;

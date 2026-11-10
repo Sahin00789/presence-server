@@ -4,15 +4,9 @@ import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
 import { generateStaffCode } from '../../shared/services/staff.service.js';
 import { sendUserCreationEmail } from '../../shared/services/mail.service.js';
-import { uploadToCloudinary } from '../../shared/services/cloudinary.service.js';
 import { CreateEmployeeInput, EmployeeDto, UpdateEmployeeInput } from './schemas.js';
 
 export const EMPLOYEE_TTL_HOURS = 48;
-
-function toPaise(value: string | number | null | undefined): number {
-  if (value === null || value === undefined) return 0;
-  return Math.round(Number(value) * 100);
-}
 
 export async function createEmployee(
   fastify: FastifyInstance,
@@ -116,17 +110,7 @@ export async function createEmployee(
 
   const expiresAt = new Date(Date.now() + EMPLOYEE_TTL_HOURS * 60 * 60 * 1000);
 
-  let uploadedAvatarUrl: string | null = null;
-  if (input.avatarBase64) {
-    try {
-      uploadedAvatarUrl = await uploadToCloudinary(input.avatarBase64, 'employee-avatars');
-    } catch (err) {
-      fastify.log.warn({ err }, 'Failed to upload employee avatar to Cloudinary');
-      uploadedAvatarUrl = input.avatarBase64;
-    }
-  } else if (input.avatarUrl) {
-    uploadedAvatarUrl = input.avatarUrl;
-  }
+  let uploadedAvatarUrl: string | null = input.avatarBase64 || input.avatarUrl || null;
 
   const profile = await fastify.db.transaction(async (tx) => {
     let [userRecord] = await tx
@@ -242,7 +226,8 @@ export async function createEmployee(
 export async function listEmployees(
   fastify: FastifyInstance,
   organizationId: string,
-  options?: { premisesId?: string; search?: string }
+  options?: { premisesId?: string; search?: string },
+  _role: 'OWNER' | 'EMPLOYEE' = 'OWNER'
 ): Promise<EmployeeDto[]> {
   const [org] = await fastify.db
     .select({ name: schema.organizations.name })
@@ -316,7 +301,7 @@ export async function listEmployees(
     .groupBy((schema as any).employeeEarningLedger.employeeId);
 
   const earnedByEmployee = new Map(
-    earnedRows.map((row) => [row.employeeId, toPaise(row.earned)])
+    earnedRows.map((row) => [row.employeeId, Math.round(Number(row.earned) || 0)])
   );
 
   // Paid and due from payroll
@@ -338,7 +323,7 @@ export async function listEmployees(
   const payrollByEmployee = new Map(
     payrollRows.map((row) => [
       row.employeeId,
-      { paid: toPaise(row.paid), due: toPaise(row.due) },
+      { paid: Math.round(Number(row.paid) || 0), due: Math.round(Number(row.due) || 0) },
     ])
   );
 
@@ -577,15 +562,7 @@ export async function updateEmployee(
     }
   }
 
-  let uploadedAvatarUrl: string | undefined = input.avatarUrl ?? undefined;
-  if (input.avatarBase64) {
-    try {
-      uploadedAvatarUrl = await uploadToCloudinary(input.avatarBase64, 'employee-avatars');
-    } catch (err) {
-      fastify.log.warn({ err }, 'Failed to upload employee avatar to Cloudinary');
-      uploadedAvatarUrl = input.avatarBase64;
-    }
-  }
+  let uploadedAvatarUrl: string | undefined = input.avatarBase64 || input.avatarUrl || undefined;
 
   await fastify.db.transaction(async (tx) => {
     const empUpdates: Record<string, any> = { updatedAt: new Date() };
@@ -659,4 +636,37 @@ export async function updateEmployee(
     throw new AppError('Updated employee record not found', 500, 'INTERNAL_SERVER_ERROR');
   }
   return updated;
+}
+
+export async function uploadEmployeePhoto(
+  fastify: FastifyInstance,
+  organizationId: string,
+  employeeId: string,
+  actorUserId: string,
+  actorRole: 'OWNER' | 'EMPLOYEE',
+  input: { photoBase64?: string; photoUrl?: string; avatarBase64?: string; avatarUrl?: string }
+): Promise<{ employeeId: string; avatarUrl: string }> {
+  let targetEmployeeId = employeeId;
+  if (employeeId === 'my' || employeeId === 'me') {
+    const profile = await getSelfEmployeeProfile(fastify, organizationId, actorUserId);
+    targetEmployeeId = profile.id;
+  }
+
+  const emp = await getEmployeeById(fastify, organizationId, targetEmployeeId, actorUserId, actorRole);
+
+  const rawPhoto = input.photoBase64 || input.avatarBase64 || input.photoUrl || input.avatarUrl;
+  if (!rawPhoto) {
+    throw new AppError('Photo payload (photoBase64 or photoUrl) is required', 400, 'PHOTO_REQUIRED');
+  }
+
+  const finalUrl = input.photoBase64 || input.avatarBase64 || input.photoUrl || input.avatarUrl || rawPhoto;
+
+  if (emp.userId) {
+    await fastify.db
+      .update(schema.users)
+      .set({ avatarUrl: finalUrl, updatedAt: new Date() })
+      .where(eq(schema.users.id, emp.userId));
+  }
+
+  return { employeeId: targetEmployeeId, avatarUrl: finalUrl };
 }

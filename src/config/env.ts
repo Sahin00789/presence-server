@@ -29,10 +29,6 @@ const envSchema = z.object({
   /** Minimum normalised Laplacian texture score accepted as passive liveness. */
   FACE_PASSIVE_LIVENESS_MIN: z.coerce.number().min(0).max(1).default(0.2),
 
-  CLOUDINARY_CLOUD_NAME: z.string().min(1),
-  CLOUDINARY_API_KEY: z.string().min(1),
-  CLOUDINARY_API_SECRET: z.string().min(1),
-
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().default(587),
   SMTP_SECURE: z.preprocess((val) => {

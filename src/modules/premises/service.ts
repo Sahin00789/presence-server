@@ -8,36 +8,26 @@ export async function getPremises(
   fastify: FastifyInstance,
   organizationId: string
 ): Promise<Premises[]> {
-  const cacheKey = `org:${organizationId}:premises:list`;
-  const orgTag = `org:${organizationId}`;
-  const premisesTag = `org:${organizationId}:premises`;
+  const rows = await fastify.db
+    .select()
+    .from(schema.premises)
+    .where(
+      and(
+        eq(schema.premises.organizationId, organizationId),
+        eq(schema.premises.isActive, true)
+      )
+    );
 
-  return fastify.cache.getOrFetch(
-    cacheKey,
-    async () => {
-      const rows = await fastify.db
-        .select()
-        .from(schema.premises)
-        .where(
-          and(
-            eq(schema.premises.organizationId, organizationId),
-            eq(schema.premises.isActive, true)
-          )
-        );
-
-      return rows.map((r) => ({
-        id: r.id,
-        organizationId: r.organizationId,
-        name: r.name,
-        address: r.address ?? null,
-        latitude: String(r.latitude),
-        longitude: String(r.longitude),
-        radiusMeters: r.radiusMeters,
-        isActive: r.isActive,
-      }));
-    },
-    { ttlMs: 120_000, tags: [orgTag, premisesTag] }
-  );
+  return rows.map((r) => ({
+    id: r.id,
+    organizationId: r.organizationId,
+    name: r.name,
+    address: r.address ?? null,
+    latitude: String(r.latitude),
+    longitude: String(r.longitude),
+    radiusMeters: r.radiusMeters,
+    isActive: r.isActive,
+  }));
 }
 
 export async function getSinglePremises(
@@ -86,8 +76,6 @@ export async function createPremises(
     isActive: created.isActive,
   };
 
-  // Invalidate cache and broadcast real-time update
-  fastify.cache.invalidateTag(`org:${organizationId}:premises`);
   if (typeof fastify.publishDomainEvent === 'function') {
     await fastify.publishDomainEvent({
       type: 'premises_update',
@@ -139,8 +127,6 @@ export async function updatePremises(
     isActive: updated.isActive,
   };
 
-  // Invalidate cache and broadcast real-time update
-  fastify.cache.invalidateTag(`org:${organizationId}:premises`);
   if (typeof fastify.publishDomainEvent === 'function') {
     await fastify.publishDomainEvent({
       type: 'premises_update',

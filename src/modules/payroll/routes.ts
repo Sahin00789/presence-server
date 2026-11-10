@@ -24,40 +24,24 @@ import {
   recordPayrollTransaction,
   updatePayrollTransaction,
 } from './service.js';
-import { findStaffProfile } from '../../shared/services/staff.service.js';
 
 export async function payrollRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
-  // 1. Get monthly payroll report for an employee / premises
+  // 1. Get monthly payroll report
   server.get(
     '/api/v1/payroll/monthly',
     {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'EMPLOYEE')],
-      schema: {
-        querystring: monthYearQuerySchema,
-      },
+      schema: { querystring: monthYearQuerySchema },
     },
     async (request, reply) => {
       const q = request.query as z.infer<typeof monthYearQuerySchema>;
-      let staffId = q.staffProfileId;
-      let premisesId = q.premisesId;
-      if (request.user.role === 'EMPLOYEE') {
-        const profile = await findStaffProfile(fastify, request.user.userId, request.user.organizationId);
-        if (!profile) return reply.send(null);
-        staffId = profile.id;
-        if (!premisesId && profile.premisesId) {
-          premisesId = profile.premisesId;
-        }
-      }
-      if (!staffId || !premisesId) {
-        return reply.status(400).send({ error: 'staffProfileId and premisesId required' });
-      }
       const report = await getOrGenerateMonthlyPayroll(
         fastify,
         request.user.organizationId,
-        premisesId,
-        staffId,
+        q.premisesId || '',
+        q.staffProfileId || '',
         q.month,
         q.year
       );
@@ -65,14 +49,12 @@ export async function payrollRoutes(fastify: FastifyInstance) {
     }
   );
 
-  // 2. Get monthly payroll summaries for owner
+  // 2. Get monthly payroll summaries (OWNER - ALL)
   server.get(
     '/api/v1/payroll/monthly/summary',
     {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
-      schema: {
-        querystring: monthYearQuerySchema,
-      },
+      schema: { querystring: monthYearQuerySchema },
     },
     async (request, reply) => {
       const q = request.query as z.infer<typeof monthYearQuerySchema>;
@@ -87,14 +69,31 @@ export async function payrollRoutes(fastify: FastifyInstance) {
     }
   );
 
-  // 3. My monthly earning ledger route for employee
+  server.get(
+    '/api/v1/payroll/all',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: { querystring: monthYearQuerySchema },
+    },
+    async (request, reply) => {
+      const q = request.query as z.infer<typeof monthYearQuerySchema>;
+      const summaries = await listMonthlyPayrollSummaries(
+        fastify,
+        request.user.organizationId,
+        q.month,
+        q.year,
+        q.premisesId
+      );
+      return reply.send(summaries);
+    }
+  );
+
+  // 3. My monthly earning ledger for employee
   server.get(
     '/api/v1/payroll/my-monthly-earning-ledger',
     {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
-      schema: {
-        querystring: myMonthlyEarningLedgerQuerySchema,
-      },
+      schema: { querystring: myMonthlyEarningLedgerQuerySchema },
     },
     async (request, reply) => {
       const q = request.query as z.infer<typeof myMonthlyEarningLedgerQuerySchema>;
@@ -103,14 +102,11 @@ export async function payrollRoutes(fastify: FastifyInstance) {
     }
   );
 
-  // Alias route for my-monthly-ledger
   server.get(
     '/api/v1/payroll/my-monthly-ledger',
     {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
-      schema: {
-        querystring: myMonthlyEarningLedgerQuerySchema,
-      },
+      schema: { querystring: myMonthlyEarningLedgerQuerySchema },
     },
     async (request, reply) => {
       const q = request.query as z.infer<typeof myMonthlyEarningLedgerQuerySchema>;
@@ -119,7 +115,7 @@ export async function payrollRoutes(fastify: FastifyInstance) {
     }
   );
 
-  // 4. My overall payroll summary (total earned, paid, due)
+  // 4. My overall payroll summary (EMPLOYEE - MY)
   server.get(
     '/api/v1/payroll/my-overall-summary',
     {
@@ -131,14 +127,23 @@ export async function payrollRoutes(fastify: FastifyInstance) {
     }
   );
 
-  // 5. Download payslip PDF for a given month and year
+  server.get(
+    '/api/v1/payroll/my',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE', 'OWNER')],
+    },
+    async (request, reply) => {
+      const summary = await getMyOverallPayrollSummary(fastify, request.user);
+      return reply.send(summary);
+    }
+  );
+
+  // 5. Download payslip PDF
   server.get(
     '/api/v1/payroll/payslip/download',
     {
       preHandler: [fastify.authenticate],
-      schema: {
-        querystring: downloadPayslipQuerySchema,
-      },
+      schema: { querystring: downloadPayslipQuerySchema },
     },
     async (request, reply) => {
       const q = request.query as z.infer<typeof downloadPayslipQuerySchema>;
@@ -150,14 +155,12 @@ export async function payrollRoutes(fastify: FastifyInstance) {
     }
   );
 
-  // 7. Transactions CRUD
+  // 6. Transactions CRUD
   server.get(
     '/api/v1/payroll/transactions',
     {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
-      schema: {
-        querystring: transactionsQuerySchema,
-      },
+      schema: { querystring: transactionsQuerySchema },
     },
     async (request, reply) => {
       const { monthlyPayrollId } = request.query as z.infer<typeof transactionsQuerySchema>;
@@ -170,9 +173,7 @@ export async function payrollRoutes(fastify: FastifyInstance) {
     '/api/v1/payroll/transactions',
     {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
-      schema: {
-        body: recordTransactionSchema,
-      },
+      schema: { body: recordTransactionSchema },
     },
     async (request, reply) => {
       const transaction = await recordPayrollTransaction(
@@ -189,9 +190,7 @@ export async function payrollRoutes(fastify: FastifyInstance) {
     '/api/v1/payroll/transactions/:id',
     {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
-      schema: {
-        body: updateTransactionSchema,
-      },
+      schema: { body: updateTransactionSchema },
     },
     async (request, reply) => {
       const { id } = request.params as { id: string };
@@ -213,42 +212,24 @@ export async function payrollRoutes(fastify: FastifyInstance) {
     }
   );
 
-  // 8. Unworked Payment Rules GET & POST
-  const handleGetUnworkedRules = async (request: any, reply: any) => {
-    const q = request.query as z.infer<typeof unworkedRulesQuerySchema>;
-    let targetEmployeeId = q.employeeId;
-    if (request.user.role === 'EMPLOYEE') {
-      const profile = await findStaffProfile(fastify, request.user.userId, request.user.organizationId);
-      if (profile) {
-        targetEmployeeId = profile.id;
-      }
+  // 7. Unworked Payment Rules GET & POST
+  server.get(
+    '/api/v1/salary/unworked-rules',
+    {
+      preHandler: [fastify.authenticate],
+      schema: { querystring: unworkedRulesQuerySchema },
+    },
+    async (request, reply) => {
+      const q = request.query as z.infer<typeof unworkedRulesQuerySchema>;
+      const rules = await getUnworkedPaymentRules(
+        fastify,
+        request.user,
+        request.user.organizationId,
+        q.employeeId,
+        q.onDate
+      );
+      return reply.send(rules);
     }
-    const rules = await getUnworkedPaymentRules(
-      fastify,
-      request.user.organizationId,
-      targetEmployeeId,
-      q.onDate
-    );
-    return reply.send(rules);
-  };
-
-  const handlePostUnworkedRule = async (request: any, reply: any) => {
-    const body = request.body as z.infer<typeof createUnworkedPaymentRuleSchema>;
-    const created = await createUnworkedPaymentRule(
-      fastify,
-      request.user.organizationId,
-      body
-    );
-    return reply.send(created);
-  };
-
-  server.get(
-    '/api/v1/salary/unworked-rules',
-    {
-      preHandler: [fastify.authenticate],
-      schema: { querystring: unworkedRulesQuerySchema },
-    },
-    handleGetUnworkedRules
   );
 
   server.get(
@@ -257,7 +238,17 @@ export async function payrollRoutes(fastify: FastifyInstance) {
       preHandler: [fastify.authenticate],
       schema: { querystring: unworkedRulesQuerySchema },
     },
-    handleGetUnworkedRules
+    async (request, reply) => {
+      const q = request.query as z.infer<typeof unworkedRulesQuerySchema>;
+      const rules = await getUnworkedPaymentRules(
+        fastify,
+        request.user,
+        request.user.organizationId,
+        q.employeeId,
+        q.onDate
+      );
+      return reply.send(rules);
+    }
   );
 
   server.post(
@@ -266,7 +257,15 @@ export async function payrollRoutes(fastify: FastifyInstance) {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: { body: createUnworkedPaymentRuleSchema },
     },
-    handlePostUnworkedRule
+    async (request, reply) => {
+      const body = request.body as z.infer<typeof createUnworkedPaymentRuleSchema>;
+      const created = await createUnworkedPaymentRule(
+        fastify,
+        request.user.organizationId,
+        body
+      );
+      return reply.send(created);
+    }
   );
 
   server.post(
@@ -275,7 +274,14 @@ export async function payrollRoutes(fastify: FastifyInstance) {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: { body: createUnworkedPaymentRuleSchema },
     },
-    handlePostUnworkedRule
+    async (request, reply) => {
+      const body = request.body as z.infer<typeof createUnworkedPaymentRuleSchema>;
+      const created = await createUnworkedPaymentRule(
+        fastify,
+        request.user.organizationId,
+        body
+      );
+      return reply.send(created);
+    }
   );
 }
-

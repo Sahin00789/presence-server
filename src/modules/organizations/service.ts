@@ -11,7 +11,7 @@ import {
   UpdateOrganizationInput,
 } from './schemas.js';
 
-import { uploadToCloudinary } from '../../shared/services/cloudinary.service.js';
+
 
 export async function getOrganization(
   fastify: FastifyInstance,
@@ -139,11 +139,7 @@ export async function updateOrganization(
   actorUserId: string,
   input: UpdateOrganizationInput
 ): Promise<Organization> {
-  let resolvedLogoUrl = input.logoUrl;
-
-  if (input.logo) {
-    resolvedLogoUrl = await uploadToCloudinary(input.logo, 'organization-logos');
-  }
+  const resolvedLogoUrl = input.logo || input.logoUrl;
 
   const [updated] = await fastify.db
     .update(schema.organizations)
@@ -307,4 +303,51 @@ export async function deactivateMember(
   });
 
   return { deactivated: true };
+}
+
+export async function uploadOrganizationLogo(
+  fastify: FastifyInstance,
+  organizationId: string,
+  _actorUserId: string,
+  input: { logoBase64?: string; logoUrl?: string; logo?: string }
+): Promise<{ organizationId: string; logoUrl: string }> {
+  const logoInput = input.logoBase64 || input.logoUrl || input.logo;
+  if (!logoInput) {
+    throw new AppError('Logo data (logoBase64 or logoUrl) is required', 400, 'LOGO_REQUIRED');
+  }
+
+  const resolvedLogoUrl = input.logoBase64 || input.logoUrl || input.logo || logoInput;
+
+  const [updated] = await fastify.db
+    .update(schema.organizations)
+    .set({ logoUrl: resolvedLogoUrl, updatedAt: new Date() })
+    .where(eq(schema.organizations.id, organizationId))
+    .returning();
+
+  if (!updated) {
+    throw new AppError('Organization not found', 404, 'ORGANIZATION_NOT_FOUND');
+  }
+
+  return { organizationId: updated.id, logoUrl: updated.logoUrl || '' };
+}
+
+export async function uploadOwnerPhoto(
+  fastify: FastifyInstance,
+  _organizationId: string,
+  ownerUserId: string,
+  input: { photoBase64?: string; photoUrl?: string; avatarBase64?: string; avatarUrl?: string }
+): Promise<{ ownerUserId: string; avatarUrl: string }> {
+  const rawPhoto = input.photoBase64 || input.avatarBase64 || input.photoUrl || input.avatarUrl;
+  if (!rawPhoto) {
+    throw new AppError('Owner photo payload (photoBase64 or photoUrl) is required', 400, 'PHOTO_REQUIRED');
+  }
+
+  const uploadedUrl = input.photoBase64 || input.avatarBase64 || input.photoUrl || input.avatarUrl || rawPhoto;
+
+  await fastify.db
+    .update(schema.users)
+    .set({ avatarUrl: uploadedUrl, updatedAt: new Date() })
+    .where(eq(schema.users.id, ownerUserId));
+
+  return { ownerUserId, avatarUrl: uploadedUrl };
 }

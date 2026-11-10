@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 const staffEarningLedger = (schema as any).employeeEarningLedger ?? (schema as any).staffEarningLedger;
 import { AppError } from '../../shared/errors/app-error.js';
@@ -1568,11 +1568,25 @@ export async function getEmployeeAttendanceAndEarningsHistory(
   organizationId: string,
   userId: string,
   from?: string,
-  to?: string
+  to?: string,
+  month?: string,
+  year?: number
 ) {
   const profile = await findStaffProfile(fastify, userId, organizationId);
   if (!profile) {
     return [];
+  }
+
+  let f = from;
+  let t = to;
+  if (month && !f && !t) {
+    const [y, m] = month.split('-').map((v) => parseInt(v));
+    f = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-01`;
+    const last = new Date(y, m, 0).getDate();
+    t = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(last).padStart(2, '0')}`;
+  } else if (year && !month && !f && !t) {
+    f = `${year}-01-01`;
+    t = `${year}-12-31`;
   }
 
   const conditions = [
@@ -1583,8 +1597,8 @@ export async function getEmployeeAttendanceAndEarningsHistory(
       inArray(schema.employeeAttendance.status, ['PRESENT', 'HALF_DAY', 'ABSENT', 'LEAVE'])
     ),
   ];
-  if (from) conditions.push(gte(schema.employeeAttendance.workDate, from));
-  if (to) conditions.push(lte(schema.employeeAttendance.workDate, to));
+  if (f) conditions.push(gte(schema.employeeAttendance.workDate, f));
+  if (t) conditions.push(lte(schema.employeeAttendance.workDate, t));
 
   const rows = await fastify.db
     .select({
@@ -1637,10 +1651,50 @@ export async function getUpcomingAttendance(fastify: any, organizationId: string
     const sShift = await resolveShiftForClockIn(fastify, organizationId, profile.id, now, timezone);
     shift = { assignmentId: sShift.assignmentId, workDate: sShift.workDate, startTime: sShift.startTime, endTime: sShift.endTime, startAt: sShift.startAt.toISOString(), endAt: sShift.endAt.toISOString(), scheduledMinutes: sShift.scheduledMinutes };
   } catch (e) {
-    shift = null;
+    if (!date) {
+      const assignments = await fastify.db
+        .select({
+          assignmentId: schema.employeeShiftAssignments.id,
+          startTime: schema.shifts.startTime,
+          endTime: schema.shifts.endTime,
+          halfDayThreshold: schema.shifts.halfDayThreshold,
+          dayName: schema.shifts.dayName,
+        })
+        .from(schema.employeeShiftAssignments)
+        .innerJoin(schema.shifts, eq(schema.shifts.id, schema.employeeShiftAssignments.shiftId))
+        .where(
+          and(
+            eq(schema.employeeShiftAssignments.employeeId, profile.id),
+            eq(schema.employeeShiftAssignments.organizationId, organizationId),
+            eq(schema.employeeShiftAssignments.isActive, true)
+          )
+        );
+
+      for (let dayOffset = 1; dayOffset <= 7; dayOffset++) {
+        const nextDateObj = new Date(now.getTime() + dayOffset * 86400000);
+        const nextIso = toDateISOInTimeZone(nextDateObj, timezone);
+        const dow = new Date(`${nextIso}T00:00:00Z`).getUTCDay();
+        const match = assignments.find((a: any) => getAssignedDayNumbers(a.dayName).includes(dow));
+        if (match) {
+          const window = resolveShiftWindow(nextIso, match.startTime, match.endTime, 0, timezone);
+          shift = {
+            assignmentId: match.assignmentId,
+            workDate: nextIso,
+            startTime: match.startTime,
+            endTime: match.endTime,
+            startAt: window.startAt.toISOString(),
+            endAt: window.endAt.toISOString(),
+            scheduledMinutes: window.scheduledMinutes,
+          };
+          break;
+        }
+      }
+    } else {
+      shift = null;
+    }
   }
-  const upcomingOvertime = await fastify.db.select().from(schema.overtime).where(and(eq(schema.overtime.organizationId, organizationId), eq(schema.overtime.employeeId, profile.id), eq(schema.overtime.workDate, targetDate), inArray(schema.overtime.status, ['CREATED', 'IN_PROGRESS']))).orderBy(schema.overtime.startTime);
-  return { date: targetDate, shift, overtime: upcomingOvertime };
+  const upcomingOvertime = await fastify.db.select().from(schema.overtime).where(and(eq(schema.overtime.organizationId, organizationId), eq(schema.overtime.employeeId, profile.id), gte(schema.overtime.workDate, targetDate), inArray(schema.overtime.status, ['CREATED', 'IN_PROGRESS']))).orderBy(schema.overtime.workDate, schema.overtime.startTime);
+  return { date: shift?.workDate || targetDate, shift, overtime: upcomingOvertime };
 }
 
 export async function getNextUpcomingAttendance(fastify: any, organizationId: string, userId: string) {
@@ -2025,9 +2079,8 @@ export async function submitShiftLocationCheck(
   }
 
   try {
-    await fastify.db.insert(schema.attendanceLocationPings).values({
+    await fastify.db.insert(schema.shiftLocationPings).values({
       shiftAttendanceId: targetId,
-      overtimeAttendanceId: null,
       checkedAt,
       latitude: body.latitude.toFixed(7),
       longitude: body.longitude.toFixed(7),
@@ -2144,8 +2197,7 @@ export async function submitOvertimeLocationCheck(
   }
 
   try {
-    await fastify.db.insert(schema.attendanceLocationPings).values({
-      shiftAttendanceId: null,
+    await fastify.db.insert(schema.overtimeLocationPings).values({
       overtimeAttendanceId: targetId,
       checkedAt,
       latitude: body.latitude.toFixed(7),
@@ -2176,6 +2228,52 @@ export async function submitOvertimeLocationCheck(
     .returning();
 
   return { result, consecutiveFailures: updated.consecutivePingFailures, exceptionCreated: false };
+}
+
+export async function getShiftLocationPings(
+  fastify: FastifyInstance,
+  organizationId: string,
+  shiftAttendanceId: string
+) {
+  const pings = await fastify.db
+    .select()
+    .from(schema.shiftLocationPings)
+    .where(eq(schema.shiftLocationPings.shiftAttendanceId, shiftAttendanceId))
+    .orderBy(asc(schema.shiftLocationPings.checkedAt));
+
+  return pings.map((p) => ({
+    id: p.id,
+    shiftAttendanceId: p.shiftAttendanceId,
+    timestamp: p.checkedAt.toISOString(),
+    latitude: Number(p.latitude),
+    longitude: Number(p.longitude),
+    accuracyMeters: Number(p.accuracyMeters),
+    isInsideGeofence: p.result === 'IN_PREMISES',
+    result: p.result,
+  }));
+}
+
+export async function getOvertimeLocationPings(
+  fastify: FastifyInstance,
+  organizationId: string,
+  overtimeAttendanceId: string
+) {
+  const pings = await fastify.db
+    .select()
+    .from(schema.overtimeLocationPings)
+    .where(eq(schema.overtimeLocationPings.overtimeAttendanceId, overtimeAttendanceId))
+    .orderBy(asc(schema.overtimeLocationPings.checkedAt));
+
+  return pings.map((p) => ({
+    id: p.id,
+    overtimeAttendanceId: p.overtimeAttendanceId,
+    timestamp: p.checkedAt.toISOString(),
+    latitude: Number(p.latitude),
+    longitude: Number(p.longitude),
+    accuracyMeters: Number(p.accuracyMeters),
+    isInsideGeofence: p.result === 'IN_PREMISES',
+    result: p.result,
+  }));
 }
 
 export { enumerateDates };

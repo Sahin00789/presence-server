@@ -3,14 +3,11 @@ import { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 import {
   activeLocationSessionResponseSchema,
-  locationCheckBodySchema,
-  locationCheckResponseSchema,
   todayLocationPresenceResponseSchema,
 } from './schemas.js';
 import {
   getActiveLocationSession,
   getTodayLocationPresence,
-  submitLocationCheck,
 } from './service.js';
 
 export async function locationRoutes(fastify: FastifyInstance) {
@@ -60,37 +57,4 @@ export async function locationRoutes(fastify: FastifyInstance) {
 
   server.get('/api/v1/live-monitor/active', { preHandler: [fastify.authenticate], schema: activeSchema }, activeHandler);
   server.get('/api/v1/location/active', { preHandler: [fastify.authenticate], schema: activeSchema }, activeHandler);
-
-  const checkHandler = async (request: any, reply: any) => {
-    const body = request.body as {
-      attendanceEventId?: string;
-      shiftAttendanceId?: string;
-      latitude: number;
-      longitude: number;
-      accuracyMeters: number;
-      isMock?: boolean;
-      timestamp?: string;
-      clientRequestId?: string;
-    };
-    const checkRes = await submitLocationCheck(
-      fastify,
-      request.user.userId,
-      request.user.organizationId,
-      body
-    );
-    return reply.send({
-      success: true,
-      result: checkRes.result,
-    });
-  };
-
-  const checkSchema = {
-    description: 'Submit GPS geofence location check for active shift.',
-    tags: ['Live Monitor'],
-    body: locationCheckBodySchema,
-    response: { 200: locationCheckResponseSchema },
-  };
-
-  server.post('/api/v1/live-monitor/checks', { preHandler: [fastify.authenticate], schema: checkSchema }, checkHandler);
-  server.post('/api/v1/location/checks', { preHandler: [fastify.authenticate], schema: checkSchema }, checkHandler);
 }

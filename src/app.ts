@@ -8,7 +8,6 @@ import authenticationPlugin from './plugins/authentication.js';
 import authorizationPlugin from './plugins/authorization.js';
 import eventsPlugin from './plugins/events.js';
 import rateLimitPlugin from './plugins/rate-limit.js';
-import cachePlugin from './plugins/cache.js';
 import { healthRoutes } from './modules/health/routes.js';
 import { authRoutes } from './modules/auth/routes.js';
 import { organizationRoutes } from './modules/organizations/routes.js';
@@ -58,7 +57,6 @@ export function buildApp() {
 
   // Register Infrastructure Plugins
   app.register(postgresPlugin);
-  app.register(cachePlugin);
   app.register(authenticationPlugin);
   app.register(authorizationPlugin);
   app.register(eventsPlugin);

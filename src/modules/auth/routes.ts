@@ -227,7 +227,7 @@ export async function authRoutes(fastify: FastifyInstance) {
     {
       preHandler: [fastify.authenticate],
       schema: {
-        description: 'Upload profile picture/avatar (base64 string) to Cloudinary',
+        description: 'Upload profile picture/avatar (base64 or URL)',
         tags: ['Auth'],
         body: z.object({ avatar: z.string() }),
         response: {

@@ -1,7 +1,8 @@
 import { FastifyInstance } from 'fastify';
-import { and, asc, eq, gte, lte, ne, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, lte, ne, or, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
+import { resolveStaffProfile } from '../../shared/services/staff.service.js';
 import {
   dayOfWeek,
   enumerateDates,
@@ -81,7 +82,8 @@ export function getAssignedDayNumbers(dayName?: string | null): number[] {
 export async function listShifts(
   fastify: FastifyInstance,
   organizationId: string,
-  premisesId?: string
+  premisesId?: string,
+  _role: 'OWNER' | 'EMPLOYEE' = 'OWNER'
 ) {
   const conditions = [eq(schema.shifts.organizationId, organizationId)];
   if (premisesId && premisesId.trim().length > 0) {
@@ -143,10 +145,6 @@ export async function createShift(
     })
     .returning();
 
-  if (fastify.cache) {
-    fastify.cache.invalidateTag(`org:${organizationId}:shifts`);
-  }
-
   return {
     id: created.id,
     organizationId: created.organizationId,
@@ -204,10 +202,6 @@ export async function updateShift(
     )
     .returning();
 
-  if (fastify.cache) {
-    fastify.cache.invalidateTag(`org:${organizationId}:shifts`);
-  }
-
   return {
     id: updated.id,
     organizationId: updated.organizationId,
@@ -254,10 +248,6 @@ export async function deleteShift(
       )
     );
 
-  if (fastify.cache) {
-    fastify.cache.invalidateTag(`org:${organizationId}:shifts`);
-  }
-
   return { deleted: true };
 }
 
@@ -265,7 +255,8 @@ export async function listShiftAssignments(
   fastify: FastifyInstance,
   organizationId: string,
   premisesId?: string,
-  staffId?: string
+  staffId?: string,
+  _role: 'OWNER' | 'EMPLOYEE' = 'OWNER'
 ) {
   const conditions = [eq(schema.employeeShiftAssignments.organizationId, organizationId)];
 
@@ -274,7 +265,12 @@ export async function listShiftAssignments(
   }
 
   if (staffId && staffId.trim().length > 0) {
-    conditions.push(eq(schema.employeeShiftAssignments.employeeId, staffId));
+    try {
+      const profile = await resolveStaffProfile(fastify, organizationId, staffId);
+      conditions.push(eq(schema.employeeShiftAssignments.employeeId, profile.id));
+    } catch {
+      conditions.push(eq(schema.employeeShiftAssignments.employeeId, staffId));
+    }
   }
 
   const rows = await fastify.db
@@ -389,10 +385,6 @@ export async function createShiftAssignment(
     input.weeklyOffs
   );
 
-  if (fastify.cache) {
-    fastify.cache.invalidateTag(`org:${organizationId}:shifts`);
-  }
-
   return {
     id: created.id,
     organizationId: created.organizationId,
@@ -461,10 +453,6 @@ export async function updateShiftAssignment(
     input.weeklyOffs
   );
 
-  if (fastify.cache) {
-    fastify.cache.invalidateTag(`org:${organizationId}:shifts`);
-  }
-
   return {
     id: updated.id,
     organizationId: updated.organizationId,
@@ -519,10 +507,6 @@ export async function deleteShiftAssignment(
     actorUserId,
     existing.employeeId
   );
-
-  if (fastify.cache) {
-    fastify.cache.invalidateTag(`org:${organizationId}:shifts`);
-  }
 
   return { deleted: true };
 }

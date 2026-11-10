@@ -19,7 +19,6 @@ import {
   GoogleUserProfile,
 } from '../../integrations/google-auth.service.js';
 import { AppError } from '../../shared/errors/app-error.js';
-import { uploadToCloudinary } from '../../shared/services/cloudinary.service.js';
 import { sendOtpEmail } from '../../shared/services/mail.service.js';
 import { env } from '../../config/env.js';
 import * as schema from '../../db/schema.js';
@@ -953,7 +952,7 @@ export async function processUpdateProfile(
   let newAvatarUrl = input.avatarUrl;
 
   if (input.avatar) {
-    newAvatarUrl = await uploadToCloudinary(input.avatar, 'user-avatars');
+    newAvatarUrl = input.avatar;
   }
 
   await fastify.db

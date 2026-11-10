@@ -280,7 +280,7 @@ export const employeeShiftAttendance = pgTable('employee_shift_attendance', {
   outsidePingCount: integer('outside_ping_count').notNull().default(0),
   consecutivePingFailures: integer('consecutive_ping_failures').notNull().default(0),
   faceScore: numeric('face_score', { precision: 5, scale: 4 }),
-git  statusUpdatedBy: uuid('status_updated_by').references(() => users.id, { onDelete: 'set null' }),
+  statusUpdatedBy: uuid('status_updated_by').references(() => users.id, { onDelete: 'set null' }),
   remarks: text('remarks'),
   correctionReason: text('correction_reason'),
   correctedAt: timestamp('corrected_at', { withTimezone: true }),
@@ -328,13 +328,10 @@ export const employeeOvertimeAttendance = pgTable('employee_overtime_attendance'
 
 export const employeeAttendance = employeeShiftAttendance;
 
-// 12. Attendance Location Pings
-export const attendanceLocationPings = pgTable('attendance_location_pings', {
+// 12a.Shift Attendance Location Pings
+export const shiftLocationPings = pgTable('shift_location_pings', {
   id: uuid('id').primaryKey().defaultRandom(),
-  shiftAttendanceId: uuid('shift_attendance_id').references(() => employeeShiftAttendance.id, {
-    onDelete: 'cascade',
-  }),
-  overtimeAttendanceId: uuid('overtime_attendance_id').references(() => employeeOvertimeAttendance.id, {
+  shiftAttendanceId: uuid('shift_attendance_id').notNull().references(() => employeeShiftAttendance.id, {
     onDelete: 'cascade',
   }),
   checkedAt: timestamp('checked_at', { withTimezone: true }).notNull().defaultNow(),
@@ -345,19 +342,29 @@ export const attendanceLocationPings = pgTable('attendance_location_pings', {
   clientRequestId: text('client_request_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
-  uniqueIndex('attendance_pings_shift_request_id_idx')
+  uniqueIndex('shift_location_pings_request_id_idx')
     .on(table.shiftAttendanceId, table.clientRequestId)
-    .where(sql`client_request_id IS NOT NULL AND shift_attendance_id IS NOT NULL`),
-  uniqueIndex('attendance_pings_overtime_request_id_idx')
+    .where(sql`client_request_id IS NOT NULL`),
+  index('shift_location_pings_checked_idx').on(table.shiftAttendanceId, table.checkedAt),
+]);
+// 12b.Overtime Attendance Location Pings
+export const overtimeLocationPings = pgTable('overtime_location_pings', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  overtimeAttendanceId: uuid('overtime_attendance_id').notNull().references(() => employeeOvertimeAttendance.id, {
+    onDelete: 'cascade',
+  }),
+  checkedAt: timestamp('checked_at', { withTimezone: true }).notNull().defaultNow(),
+  latitude: numeric('latitude', { precision: 10, scale: 7 }),
+  longitude: numeric('longitude', { precision: 10, scale: 7 }),
+  accuracyMeters: numeric('accuracy_meters', { precision: 6, scale: 2 }),
+  result: locationCheckResultEnum('result').notNull(),
+  clientRequestId: text('client_request_id'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('overtime_location_pings_request_id_idx')
     .on(table.overtimeAttendanceId, table.clientRequestId)
-    .where(sql`client_request_id IS NOT NULL AND overtime_attendance_id IS NOT NULL`),
-  index('attendance_pings_shift_checked_idx').on(table.shiftAttendanceId, table.checkedAt),
-  index('attendance_pings_overtime_checked_idx').on(table.overtimeAttendanceId, table.checkedAt),
-  check(
-    'attendance_pings_reference_check',
-    sql`(shift_attendance_id IS NOT NULL AND overtime_attendance_id IS NULL)
-      OR (overtime_attendance_id IS NOT NULL AND shift_attendance_id IS NULL)`
-  ),
+    .where(sql`client_request_id IS NOT NULL`),
+  index('overtime_location_pings_checked_idx').on(table.overtimeAttendanceId, table.checkedAt),
 ]);
 
 // 13. Monthly Payrolls

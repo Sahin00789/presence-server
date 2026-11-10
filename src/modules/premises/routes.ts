@@ -7,7 +7,7 @@ import { createPremises, getPremises, updatePremises } from './service.js';
 export async function premisesRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
-  // List Premises
+  // List All Premises (General / OWNER)
   server.get(
     '/api/v1/premises',
     {
@@ -15,9 +15,40 @@ export async function premisesRoutes(fastify: FastifyInstance) {
       schema: {
         description: 'Get active geofenced premises for the current organization',
         tags: ['Premises'],
-        response: {
-          200: z.array(premisesSchema),
-        },
+        response: { 200: z.array(premisesSchema) },
+      },
+    },
+    async (request, reply) => {
+      const result = await getPremises(fastify, request.user.organizationId);
+      return reply.send(result);
+    }
+  );
+
+  server.get(
+    '/api/v1/premises/all',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: {
+        description: 'Get all premises locations for owner dashboard',
+        tags: ['Premises'],
+        response: { 200: z.array(premisesSchema) },
+      },
+    },
+    async (request, reply) => {
+      const result = await getPremises(fastify, request.user.organizationId);
+      return reply.send(result);
+    }
+  );
+
+  // My Assigned Premises (EMPLOYEE)
+  server.get(
+    '/api/v1/premises/my',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE', 'OWNER')],
+      schema: {
+        description: 'Get active premises assigned to or relevant for current employee',
+        tags: ['Premises'],
+        response: { 200: z.array(premisesSchema) },
       },
     },
     async (request, reply) => {

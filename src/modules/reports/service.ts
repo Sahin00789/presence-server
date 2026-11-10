@@ -10,7 +10,6 @@ import { buildAttendanceSummary, listAttendanceRecords } from '../attendance/ser
 import { buildSchedule, resolveTimezone } from '../shifts/service.js';
 import { listMonthlyPayrollSummaries } from '../payroll/service.js';
 import { toDateISOInTimeZone } from '../../shared/utils/datetime.js';
-import { formatMinorUnits } from '../../shared/utils/money.js';
 import { buildPdfReport } from '../../shared/utils/pdf.js';
 
 export interface ReportTable {
@@ -68,10 +67,9 @@ export function renderReport(
   };
 }
 
-function formatMoney(paise: number): string {
-  // The product is India-first: monetary values are integer paise, displayed
-  // with Indian digit grouping and the rupee symbol.
-  return formatMinorUnits(paise, 'INR');
+function formatMoney(amountInr: number | string): string {
+  const num = Number(amountInr) || 0;
+  return `₹${num.toLocaleString('en-IN')}`;
 }
 
 export async function getDashboardSummary(
@@ -318,7 +316,7 @@ export async function buildPayrollReport(
       item.earnedAmount,
       item.paidAmount,
       item.dueAmount,
-      formatMoney(Math.round(Number(item.dueAmount) * 100)),
+      formatMoney(item.dueAmount),
       item.status,
     ]],
   };

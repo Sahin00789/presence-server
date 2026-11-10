@@ -11,6 +11,7 @@ import { cancelOvertime, createOvertime, listOvertime } from './service.js';
 export async function overtimeRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
+  // List Overtime Entries (Default/General)
   server.get(
     '/api/v1/overtime',
     {
@@ -20,9 +21,7 @@ export async function overtimeRoutes(fastify: FastifyInstance) {
           'List overtime entries. Employees receive their own, Owners receive the whole organization.',
         tags: ['Overtime'],
         querystring: overtimeListQuerySchema,
-        response: {
-          200: z.array(overtimeSchema),
-        },
+        response: { 200: z.array(overtimeSchema) },
       },
     },
     async (request, reply) => {
@@ -36,18 +35,61 @@ export async function overtimeRoutes(fastify: FastifyInstance) {
     }
   );
 
+  // List All Overtime Entries (OWNER)
+  server.get(
+    '/api/v1/overtime/all',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: {
+        description: 'List all overtime entries for the entire organization (Owner view)',
+        tags: ['Overtime'],
+        querystring: overtimeListQuerySchema,
+        response: { 200: z.array(overtimeSchema) },
+      },
+    },
+    async (request, reply) => {
+      const result = await listOvertime(
+        fastify,
+        { userId: request.user.userId, role: 'OWNER' },
+        request.user.organizationId,
+        request.query as { from?: string; to?: string; staffProfileId?: string; status?: string }
+      );
+      return reply.send(result);
+    }
+  );
+
+  // List My Overtime Entries (EMPLOYEE)
+  server.get(
+    '/api/v1/overtime/my',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE', 'OWNER')],
+      schema: {
+        description: 'List my overtime entries (Employee view)',
+        tags: ['Overtime'],
+        querystring: overtimeListQuerySchema,
+        response: { 200: z.array(overtimeSchema) },
+      },
+    },
+    async (request, reply) => {
+      const result = await listOvertime(
+        fastify,
+        { userId: request.user.userId, role: 'EMPLOYEE' },
+        request.user.organizationId,
+        request.query as { from?: string; to?: string; staffProfileId?: string; status?: string }
+      );
+      return reply.send(result);
+    }
+  );
+
   server.post(
     '/api/v1/overtime',
     {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
-        description:
-          'Raise an overtime entry for an employee.',
+        description: 'Raise an overtime entry for an employee.',
         tags: ['Overtime'],
         body: createOvertimeSchema,
-        response: {
-          200: overtimeSchema,
-        },
+        response: { 200: overtimeSchema },
       },
     },
     async (request, reply) => {
@@ -69,9 +111,7 @@ export async function overtimeRoutes(fastify: FastifyInstance) {
         description: 'Cancel an overtime entry that has not been worked yet',
         tags: ['Overtime'],
         params: z.object({ overtimeId: z.string().uuid() }),
-        response: {
-          200: z.object({ id: z.string().uuid(), status: z.string() }),
-        },
+        response: { 200: z.object({ id: z.string().uuid(), status: z.string() }) },
       },
     },
     async (request, reply) => {

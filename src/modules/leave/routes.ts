@@ -45,6 +45,7 @@ export async function leaveRoutes(fastify: FastifyInstance) {
     }
   );
 
+  // List Leave Requests (General)
   server.get(
     '/api/v1/leave',
     {
@@ -61,6 +62,52 @@ export async function leaveRoutes(fastify: FastifyInstance) {
       const result = await listLeaveRequests(
         fastify,
         request.user,
+        request.user.organizationId,
+        request.query as any
+      );
+      return reply.send(result);
+    }
+  );
+
+  // List All Leave Requests (OWNER)
+  server.get(
+    '/api/v1/leave/all',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: {
+        description: 'List all leave requests for the organization (Owner view)',
+        tags: ['Leave'],
+        querystring: leaveRequestsQuerySchema,
+        response: { 200: z.array(leaveRequestSchema) },
+      },
+    },
+    async (request, reply) => {
+      const result = await listLeaveRequests(
+        fastify,
+        { userId: request.user.userId, role: 'OWNER' },
+        request.user.organizationId,
+        request.query as any
+      );
+      return reply.send(result);
+    }
+  );
+
+  // List My Leave Requests (EMPLOYEE)
+  server.get(
+    '/api/v1/leave/my',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE', 'OWNER')],
+      schema: {
+        description: 'List my leave requests (Employee view)',
+        tags: ['Leave'],
+        querystring: leaveRequestsQuerySchema,
+        response: { 200: z.array(leaveRequestSchema) },
+      },
+    },
+    async (request, reply) => {
+      const result = await listLeaveRequests(
+        fastify,
+        { userId: request.user.userId, role: 'EMPLOYEE' },
         request.user.organizationId,
         request.query as any
       );

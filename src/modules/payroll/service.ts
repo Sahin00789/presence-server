@@ -1268,15 +1268,24 @@ export async function getShiftPaymentRules(
 
 export async function getUnworkedPaymentRules(
   fastify: FastifyInstance,
+  user: { userId: string; role: 'OWNER' | 'EMPLOYEE' },
   organizationId: string,
   employeeId?: string,
   onDate?: string
 ) {
+  let targetEmployeeId = employeeId;
+  if (user.role === 'EMPLOYEE') {
+    const profile = await findStaffProfile(fastify, user.userId, organizationId);
+    if (profile) {
+      targetEmployeeId = profile.id;
+    }
+  }
+
   const conditions = [eq(schema.unworkedPaymentRules.organizationId, organizationId)];
 
-  if (employeeId) {
+  if (targetEmployeeId) {
     conditions.push(
-      sql`(${schema.unworkedPaymentRules.employeeId} = ${employeeId} OR ${schema.unworkedPaymentRules.employeeId} IS NULL)`
+      sql`(${schema.unworkedPaymentRules.employeeId} = ${targetEmployeeId} OR ${schema.unworkedPaymentRules.employeeId} IS NULL)`
     );
   }
 

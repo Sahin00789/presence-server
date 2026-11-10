@@ -7,6 +7,12 @@ import { createHoliday, deleteHoliday, listHolidays, updateHoliday } from './ser
 export async function holidayRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
+  const handleListHolidays = async (request: any, reply: any) => {
+    const { from, to, premisesId } = request.query as { from?: string; to?: string; premisesId?: string };
+    const result = await listHolidays(fastify, request.user.organizationId, from, to, premisesId);
+    return reply.send(result);
+  };
+
   server.get(
     '/api/v1/holidays',
     {
@@ -19,16 +25,46 @@ export async function holidayRoutes(fastify: FastifyInstance) {
           to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
           premisesId: z.string().uuid().optional(),
         }),
-        response: {
-          200: z.array(holidaySchema),
-        },
+        response: { 200: z.array(holidaySchema) },
       },
     },
-    async (request, reply) => {
-      const { from, to, premisesId } = request.query as { from?: string; to?: string; premisesId?: string };
-      const result = await listHolidays(fastify, request.user.organizationId, from, to, premisesId);
-      return reply.send(result);
-    }
+    handleListHolidays
+  );
+
+  server.get(
+    '/api/v1/holidays/all',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: {
+        description: 'List all holidays for organization (Owner)',
+        tags: ['Holidays'],
+        querystring: z.object({
+          from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          premisesId: z.string().uuid().optional(),
+        }),
+        response: { 200: z.array(holidaySchema) },
+      },
+    },
+    handleListHolidays
+  );
+
+  server.get(
+    '/api/v1/holidays/my',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE', 'OWNER')],
+      schema: {
+        description: 'List holidays relevant for employee',
+        tags: ['Holidays'],
+        querystring: z.object({
+          from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          premisesId: z.string().uuid().optional(),
+        }),
+        response: { 200: z.array(holidaySchema) },
+      },
+    },
+    handleListHolidays
   );
 
   server.post(

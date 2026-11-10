@@ -1,21 +1,5 @@
 import { z } from 'zod';
 
-export const locationCheckBodySchema = z.object({
-  attendanceEventId: z.string().optional(),
-  shiftAttendanceId: z.string().optional(),
-  latitude: z.number(),
-  longitude: z.number(),
-  accuracyMeters: z.number(),
-  isMock: z.boolean().optional(),
-  timestamp: z.string().optional(),
-  clientRequestId: z.string().optional(),
-});
-
-export const locationCheckResponseSchema = z.object({
-  success: z.boolean(),
-  result: z.string().optional(),
-});
-
 export const activeLocationSessionResponseSchema = z.object({
   attendanceEventId: z.string().nullable().optional(),
   isActive: z.boolean(),
@@ -24,18 +8,32 @@ export const activeLocationSessionResponseSchema = z.object({
 
 export const locationStaffCardSchema = z.object({
   staffProfileId: z.string(),
+  userId: z.string().optional(),
   fullName: z.string(),
   staffCode: z.string().nullable().optional(),
+  role: z.string().optional(),
   premisesId: z.string().nullable().optional(),
   premisesName: z.string().nullable().optional(),
+  attendanceStatus: z.string().optional(),
+  locationStatus: z.string(),
+  dayOfWeek: z.string().optional(),
   shiftName: z.string().nullable().optional(),
   assignedStartTime: z.string().nullable().optional(),
   assignedEndTime: z.string().nullable().optional(),
+  regularShiftStartTime: z.string().nullable().optional(),
+  regularShiftEndTime: z.string().nullable().optional(),
+  hasOvertimeToday: z.boolean().optional(),
+  overtimeId: z.string().nullable().optional(),
+  overtimeName: z.string().nullable().optional(),
+  overtimeStartTime: z.string().nullable().optional(),
+  overtimeEndTime: z.string().nullable().optional(),
+  overtimeClockInTime: z.string().nullable().optional(),
+  overtimeClockOutTime: z.string().nullable().optional(),
   attendanceEventId: z.string().nullable().optional(),
   clockInTime: z.string().nullable().optional(),
   clockOutTime: z.string().nullable().optional(),
-  locationStatus: z.string(),
   consecutiveFailures: z.number(),
+  exceptionId: z.string().nullable().optional(),
   earnedAmountPaise: z.number(),
   counts: z.object({
     inside: z.number(),

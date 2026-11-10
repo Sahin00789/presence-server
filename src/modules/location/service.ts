@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, ne } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
-import { submitShiftLocationCheck } from '../attendance/service.js';
+import { getAssignedDayNumbers } from '../shifts/service.js';
 
 export async function getTodayLocationPresence(
   fastify: FastifyInstance,
@@ -11,6 +11,10 @@ export async function getTodayLocationPresence(
 ) {
   const organizationId = user.organizationId;
   const targetDate = dateFilter || new Date().toISOString().slice(0, 10);
+  const targetDateObj = new Date(`${targetDate}T00:00:00Z`);
+  const targetDow = targetDateObj.getUTCDay();
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const todayDayName = dayNames[targetDow];
 
   // 1. Resolve Premises
   const orgPremises = await fastify.db
@@ -43,7 +47,7 @@ export async function getTodayLocationPresence(
 
   const empIds = activeEmployees.map((e) => e.id);
 
-  // 3. Fetch Today's Attendance Records
+  // 3. Fetch Today's Shift Attendance Records
   const todayAttendance = empIds.length > 0
     ? await fastify.db
         .select()
@@ -60,7 +64,40 @@ export async function getTodayLocationPresence(
   const attMap = new Map(todayAttendance.map((a) => [a.employeeId, a]));
   const attIds = todayAttendance.map((a) => a.id);
 
-  // 4. Fetch Shift Assignments
+  // 4. Fetch Today's Overtime & Overtime Attendance Records
+  const todayOvertimeList = empIds.length > 0
+    ? await fastify.db
+        .select()
+        .from(schema.overtime)
+        .where(
+          and(
+            eq(schema.overtime.organizationId, organizationId),
+            eq(schema.overtime.workDate, targetDate),
+            inArray(schema.overtime.employeeId, empIds),
+            ne(schema.overtime.status, 'CANCELLED')
+          )
+        )
+    : [];
+
+  const overtimeMap = new Map(todayOvertimeList.map((ot) => [ot.employeeId, ot]));
+  const otIds = todayOvertimeList.map((ot) => ot.id);
+
+  const todayOvertimeAttendance = otIds.length > 0
+    ? await fastify.db
+        .select()
+        .from(schema.employeeOvertimeAttendance)
+        .where(
+          and(
+            eq(schema.employeeOvertimeAttendance.organizationId, organizationId),
+            eq(schema.employeeOvertimeAttendance.workDate, targetDate),
+            inArray(schema.employeeOvertimeAttendance.overtimeId, otIds)
+          )
+        )
+    : [];
+
+  const otAttMap = new Map(todayOvertimeAttendance.map((a) => [a.employeeId, a]));
+
+  // 5. Fetch Shift Assignments
   const assignments = empIds.length > 0
     ? await fastify.db
         .select({
@@ -81,14 +118,19 @@ export async function getTodayLocationPresence(
         )
     : [];
 
-  const assignmentMap = new Map(assignments.map((a) => [a.assignment.employeeId, a.shift]));
+  const empAssignmentsMap = new Map<string, typeof assignments>();
+  assignments.forEach((a) => {
+    const list = empAssignmentsMap.get(a.assignment.employeeId) || [];
+    list.push(a);
+    empAssignmentsMap.set(a.assignment.employeeId, list);
+  });
 
-  // 5. Fetch Pings for Today's Attendance
+  // 6. Fetch Pings for Today's Attendance
   const pings = attIds.length > 0
     ? await fastify.db
         .select()
-        .from(schema.attendanceLocationPings)
-        .where(inArray(schema.attendanceLocationPings.shiftAttendanceId, attIds))
+        .from(schema.shiftLocationPings)
+        .where(inArray(schema.shiftLocationPings.shiftAttendanceId, attIds))
     : [];
 
   const pingMap = new Map<string, typeof pings>();
@@ -100,39 +142,82 @@ export async function getTodayLocationPresence(
     }
   });
 
-  // 6. Build Staff Cards
+  // 7. Build Staff Cards
   const staffCards = activeEmployees.map((emp) => {
     const att = attMap.get(emp.id);
-    const shift = assignmentMap.get(emp.id);
+    const ot = overtimeMap.get(emp.id);
+    const otAtt = otAttMap.get(emp.id);
+
+    const empAssignments = empAssignmentsMap.get(emp.id) || [];
+    const matchingAssignment = empAssignments.find((a) =>
+      getAssignedDayNumbers(a.shift.dayName).includes(targetDow)
+    );
+
+    const shift = matchingAssignment?.shift ?? null;
+    const assignment = matchingAssignment?.assignment ?? null;
     const empPings = att ? pingMap.get(att.id) || [] : [];
 
     const insideCount = empPings.filter((p) => p.result === 'IN_PREMISES').length;
     const outsideCount = empPings.filter((p) => p.result === 'OUTSIDE').length;
+    const consecutiveFailures = att?.consecutivePingFailures ?? otAtt?.consecutivePingFailures ?? 0;
 
     let locationStatus = 'NOT_CLOCKED_IN';
-    if (att?.clockInAt) {
-      if (outsideCount > 0) {
+    if (att?.clockInAt || otAtt?.clockInAt) {
+      if (outsideCount > 0 || consecutiveFailures > 0) {
         locationStatus = 'Outside';
       } else {
         locationStatus = 'Inside';
       }
     }
 
+    const attendanceStatus = att ? att.status : 'NOT_CLOCKED_IN';
+
+    let exceptionId: string | null = null;
+    if (att && (att.consecutivePingFailures > 3 || att.outsidePingCount > 3)) {
+      exceptionId = att.id;
+    } else if (otAtt && (otAtt.consecutivePingFailures > 3 || otAtt.outsidePingCount > 3)) {
+      exceptionId = otAtt.id;
+    }
+
+    let earnedAmountPaise = 0;
+    if (att?.status === 'PRESENT' && assignment) {
+      earnedAmountPaise += Math.round(Number(assignment.presentPay || 0));
+    } else if (att?.status === 'HALF_DAY' && assignment) {
+      earnedAmountPaise += Math.round(Number(assignment.halfDayPay || 0));
+    }
+    if (ot && (otAtt?.status === 'PRESENT' || ot.status === 'COMPLETED')) {
+      earnedAmountPaise += Number(ot.paymentInr || 0);
+    }
+
     return {
       staffProfileId: emp.id,
+      userId: emp.userId ?? '',
       fullName: emp.name,
       staffCode: emp.employeeCode ?? null,
+      role: emp.role || 'EMPLOYEE',
       premisesId: selectedPremises?.id ?? emp.premisesId ?? null,
       premisesName: selectedPremises?.name ?? 'Main Workplace',
-      shiftName: shift?.shiftName ?? 'Standard Shift',
-      assignedStartTime: shift?.startTime ?? '09:00:00',
-      assignedEndTime: shift?.endTime ?? '17:00:00',
+      attendanceStatus,
+      locationStatus,
+      dayOfWeek: shift?.dayName ?? todayDayName,
+      shiftName: shift?.shiftName ?? 'No shift assigned',
+      assignedStartTime: shift?.startTime ?? null,
+      assignedEndTime: shift?.endTime ?? null,
+      regularShiftStartTime: shift?.startTime ?? null,
+      regularShiftEndTime: shift?.endTime ?? null,
+      hasOvertimeToday: Boolean(ot),
+      overtimeId: ot?.id ?? null,
+      overtimeName: ot?.reason || 'Overtime',
+      overtimeStartTime: ot?.startTime ?? null,
+      overtimeEndTime: ot?.endTime ?? null,
+      overtimeClockInTime: otAtt?.clockInAt ? new Date(otAtt.clockInAt).toISOString() : null,
+      overtimeClockOutTime: otAtt?.clockOutAt ? new Date(otAtt.clockOutAt).toISOString() : null,
       attendanceEventId: att?.id ?? null,
       clockInTime: att?.clockInAt ? new Date(att.clockInAt).toISOString() : null,
       clockOutTime: att?.clockOutAt ? new Date(att.clockOutAt).toISOString() : null,
-      locationStatus,
-      consecutiveFailures: att?.consecutivePingFailures ?? 0,
-      earnedAmountPaise: 0,
+      consecutiveFailures,
+      exceptionId,
+      earnedAmountPaise,
       counts: {
         inside: insideCount,
         outside: outsideCount,
@@ -210,22 +295,4 @@ export async function getActiveLocationSession(
     isActive,
     consecutiveFailures: att?.consecutivePingFailures ?? 0,
   };
-}
-
-export async function submitLocationCheck(
-  fastify: FastifyInstance,
-  userId: string,
-  organizationId: string,
-  body: {
-    attendanceEventId?: string;
-    shiftAttendanceId?: string;
-    latitude: number;
-    longitude: number;
-    accuracyMeters: number;
-    isMock?: boolean;
-    timestamp?: string;
-    clientRequestId?: string;
-  }
-) {
-  return submitShiftLocationCheck(fastify, userId, organizationId, body);
 }

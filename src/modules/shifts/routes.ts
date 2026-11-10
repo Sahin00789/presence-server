@@ -33,21 +33,49 @@ export async function shiftRoutes(fastify: FastifyInstance) {
       schema: {
         description: 'List active shift templates/definitions for the current organization',
         tags: ['Shifts'],
-        querystring: z.object({
-          premisesId: z.string().optional(),
-        }),
-        response: {
-          200: z.array(shiftSchema),
-        },
+        querystring: z.object({ premisesId: z.string().optional() }),
+        response: { 200: z.array(shiftSchema) },
       },
     },
     async (request, reply) => {
       const { premisesId } = request.query as { premisesId?: string };
-      const result = await listShifts(
-        fastify,
-        request.user.organizationId,
-        premisesId
-      );
+      const result = await listShifts(fastify, request.user.organizationId, premisesId);
+      return reply.send(result);
+    }
+  );
+
+  server.get(
+    '/api/v1/shifts/all',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: {
+        description: 'List all shift templates for organization (Owner view)',
+        tags: ['Shifts'],
+        querystring: z.object({ premisesId: z.string().optional() }),
+        response: { 200: z.array(shiftSchema) },
+      },
+    },
+    async (request, reply) => {
+      const { premisesId } = request.query as { premisesId?: string };
+      const result = await listShifts(fastify, request.user.organizationId, premisesId);
+      return reply.send(result);
+    }
+  );
+
+  server.get(
+    '/api/v1/shifts/my',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE', 'OWNER')],
+      schema: {
+        description: 'List shift templates relevant for current employee',
+        tags: ['Shifts'],
+        querystring: z.object({ premisesId: z.string().optional() }),
+        response: { 200: z.array(shiftSchema) },
+      },
+    },
+    async (request, reply) => {
+      const { premisesId } = request.query as { premisesId?: string };
+      const result = await listShifts(fastify, request.user.organizationId, premisesId);
       return reply.send(result);
     }
   );
@@ -172,9 +200,7 @@ export async function shiftRoutes(fastify: FastifyInstance) {
           staffId: z.string().optional(),
           employeeId: z.string().optional(),
         }),
-        response: {
-          200: z.array(employeeShiftAssignmentSchema),
-        },
+        response: { 200: z.array(employeeShiftAssignmentSchema) },
       },
     },
     async (request, reply) => {
@@ -183,11 +209,62 @@ export async function shiftRoutes(fastify: FastifyInstance) {
         staffId?: string;
         employeeId?: string;
       };
+      const effectiveStaffId =
+        staffId ||
+        employeeId ||
+        (request.user.role === 'EMPLOYEE' ? request.user.userId : undefined);
       const result = await listShiftAssignments(
         fastify,
         request.user.organizationId,
         premisesId,
-        staffId || employeeId
+        effectiveStaffId
+      );
+      return reply.send(result);
+    }
+  );
+
+  server.get(
+    '/api/v1/shifts/assignments/all',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: {
+        description: 'List all shift assignments (Owner view)',
+        tags: ['Shifts'],
+        querystring: z.object({
+          premisesId: z.string().optional(),
+          staffId: z.string().optional(),
+        }),
+        response: { 200: z.array(employeeShiftAssignmentSchema) },
+      },
+    },
+    async (request, reply) => {
+      const { premisesId, staffId } = request.query as { premisesId?: string; staffId?: string };
+      const result = await listShiftAssignments(
+        fastify,
+        request.user.organizationId,
+        premisesId,
+        staffId
+      );
+      return reply.send(result);
+    }
+  );
+
+  server.get(
+    '/api/v1/shifts/assignments/my',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE', 'OWNER')],
+      schema: {
+        description: 'List my assigned shifts (Employee view)',
+        tags: ['Shifts'],
+        response: { 200: z.array(employeeShiftAssignmentSchema) },
+      },
+    },
+    async (request, reply) => {
+      const result = await listShiftAssignments(
+        fastify,
+        request.user.organizationId,
+        undefined,
+        request.user.userId
       );
       return reply.send(result);
     }

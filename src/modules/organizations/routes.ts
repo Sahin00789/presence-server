@@ -7,6 +7,8 @@ import {
   organizationSchema,
   organizationSummarySchema,
   updateOrganizationSchema,
+  uploadLogoSchema,
+  uploadOwnerPhotoSchema,
 } from './schemas.js';
 import {
   createOrganization,
@@ -14,6 +16,8 @@ import {
   getOrganizationSummary,
   listOrganizationMembers,
   updateOrganization,
+  uploadOrganizationLogo,
+  uploadOwnerPhoto,
 } from './service.js';
 
 export async function organizationRoutes(fastify: FastifyInstance) {
@@ -80,25 +84,99 @@ export async function organizationRoutes(fastify: FastifyInstance) {
     }
   );
 
+  // Dedicated Organization Photo / Logo Upload Route
   server.post(
-    '/api/v1/organizations/current/logo',
+    '/api/v1/organizations/logo',
     {
       preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
       schema: {
-        description: 'Upload organization logo (Owner only)',
+        description: 'Upload organization photo/logo (Owner only)',
         tags: ['Organizations'],
-        body: z.object({ logo: z.string() }),
+        body: uploadLogoSchema,
         response: {
-          200: organizationSchema,
+          200: z.object({ organizationId: z.string(), logoUrl: z.string() }),
         },
       },
     },
     async (request, reply) => {
-      const result = await updateOrganization(
+      const result = await uploadOrganizationLogo(
         fastify,
         request.user.organizationId,
         request.user.userId,
-        { logo: request.body.logo }
+        request.body
+      );
+      return reply.send(result);
+    }
+  );
+
+  server.post(
+    '/api/v1/organizations/photo',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: {
+        description: 'Upload organization photo/logo (Owner only)',
+        tags: ['Organizations'],
+        body: uploadLogoSchema,
+        response: {
+          200: z.object({ organizationId: z.string(), logoUrl: z.string() }),
+        },
+      },
+    },
+    async (request, reply) => {
+      const result = await uploadOrganizationLogo(
+        fastify,
+        request.user.organizationId,
+        request.user.userId,
+        request.body
+      );
+      return reply.send(result);
+    }
+  );
+
+  // Dedicated Owner Photo Upload Route
+  server.post(
+    '/api/v1/organizations/owner/photo',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: {
+        description: 'Upload/update owner profile photo',
+        tags: ['Organizations'],
+        body: uploadOwnerPhotoSchema,
+        response: {
+          200: z.object({ ownerUserId: z.string(), avatarUrl: z.string() }),
+        },
+      },
+    },
+    async (request, reply) => {
+      const result = await uploadOwnerPhoto(
+        fastify,
+        request.user.organizationId,
+        request.user.userId,
+        request.body
+      );
+      return reply.send(result);
+    }
+  );
+
+  server.post(
+    '/api/v1/owner/photo',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: {
+        description: 'Upload/update owner profile photo',
+        tags: ['Organizations'],
+        body: uploadOwnerPhotoSchema,
+        response: {
+          200: z.object({ ownerUserId: z.string(), avatarUrl: z.string() }),
+        },
+      },
+    },
+    async (request, reply) => {
+      const result = await uploadOwnerPhoto(
+        fastify,
+        request.user.organizationId,
+        request.user.userId,
+        request.body
       );
       return reply.send(result);
     }

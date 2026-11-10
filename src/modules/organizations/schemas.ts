@@ -50,6 +50,19 @@ export const organizationSummarySchema = z.object({
   managerCount: z.number(),
 });
 
+export const uploadLogoSchema = z.object({
+  logoBase64: z.string().optional(),
+  logoUrl: z.string().optional(),
+  logo: z.string().optional(),
+});
+
+export const uploadOwnerPhotoSchema = z.object({
+  photoBase64: z.string().optional(),
+  photoUrl: z.string().optional(),
+  avatarBase64: z.string().optional(),
+  avatarUrl: z.string().optional(),
+});
+
 export type Organization = z.infer<typeof organizationSchema>;
 export type CreateOrganizationInput = z.infer<typeof createOrganizationSchema>;
 export type UpdateOrganizationInput = z.infer<typeof updateOrganizationSchema>;
