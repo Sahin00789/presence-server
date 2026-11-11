@@ -22,8 +22,8 @@ export const livenessEvidenceSchema = z.object({
 });
 
 export const enrollMultiPoseSchema = z.object({
-  /** The employee whose face is being enrolled (supervised). */
-  staffProfileId: z.string().uuid(),
+  /** The employee profile ID whose face is being enrolled (supervised). */
+  employeeProfileId: z.string().uuid(),
   centerVector: vector128Schema,
   leftVector: vector128Schema.optional(),
   rightVector: vector128Schema.optional(),
@@ -40,6 +40,10 @@ export const clockInFaceSchema = z.object({
   liveness: livenessEvidenceSchema,
   /** Optional premises context for kiosk deployments. */
   premisesId: z.string().uuid().optional(),
+});
+
+export const biometricsStatusQuerySchema = z.object({
+  employeeProfileId: z.string().uuid().optional(),
 });
 
 export type EnrollMultiPoseInput = z.infer<typeof enrollMultiPoseSchema>;

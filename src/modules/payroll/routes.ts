@@ -16,6 +16,7 @@ import {
   deletePayrollTransaction,
   downloadPayslipPdf,
   getMyMonthlyEarningLedger,
+  getStaffMonthlyEarningLedger,
   getMyOverallPayrollSummary,
   getOrGenerateMonthlyPayroll,
   getUnworkedPaymentRules,
@@ -88,15 +89,49 @@ export async function payrollRoutes(fastify: FastifyInstance) {
     }
   );
 
-  // 3. My monthly earning ledger for employee
+  // 3. Monthly earning ledger for employee or owner viewing staff
+  server.get(
+    '/api/v1/payroll/staff-monthly-earning-ledger',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER', 'EMPLOYEE')],
+      schema: { querystring: monthYearQuerySchema },
+    },
+    async (request, reply) => {
+      const q = request.query as z.infer<typeof monthYearQuerySchema>;
+      if (q.staffProfileId || request.user.role === 'OWNER') {
+        const staffId = q.staffProfileId || request.user.userId;
+        const ledger = await getStaffMonthlyEarningLedger(
+          fastify,
+          request.user.organizationId,
+          staffId,
+          q.month,
+          q.year
+        );
+        return reply.send(ledger);
+      }
+      const ledger = await getMyMonthlyEarningLedger(fastify, request.user, q.month, q.year);
+      return reply.send(ledger);
+    }
+  );
+
   server.get(
     '/api/v1/payroll/my-monthly-earning-ledger',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
-      schema: { querystring: myMonthlyEarningLedgerQuerySchema },
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE', 'OWNER')],
+      schema: { querystring: monthYearQuerySchema },
     },
     async (request, reply) => {
-      const q = request.query as z.infer<typeof myMonthlyEarningLedgerQuerySchema>;
+      const q = request.query as z.infer<typeof monthYearQuerySchema>;
+      if (request.user.role === 'OWNER' && q.staffProfileId) {
+        const ledger = await getStaffMonthlyEarningLedger(
+          fastify,
+          request.user.organizationId,
+          q.staffProfileId,
+          q.month,
+          q.year
+        );
+        return reply.send(ledger);
+      }
       const ledger = await getMyMonthlyEarningLedger(fastify, request.user, q.month, q.year);
       return reply.send(ledger);
     }
@@ -105,11 +140,21 @@ export async function payrollRoutes(fastify: FastifyInstance) {
   server.get(
     '/api/v1/payroll/my-monthly-ledger',
     {
-      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
-      schema: { querystring: myMonthlyEarningLedgerQuerySchema },
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE', 'OWNER')],
+      schema: { querystring: monthYearQuerySchema },
     },
     async (request, reply) => {
-      const q = request.query as z.infer<typeof myMonthlyEarningLedgerQuerySchema>;
+      const q = request.query as z.infer<typeof monthYearQuerySchema>;
+      if (request.user.role === 'OWNER' && q.staffProfileId) {
+        const ledger = await getStaffMonthlyEarningLedger(
+          fastify,
+          request.user.organizationId,
+          q.staffProfileId,
+          q.month,
+          q.year
+        );
+        return reply.send(ledger);
+      }
       const ledger = await getMyMonthlyEarningLedger(fastify, request.user, q.month, q.year);
       return reply.send(ledger);
     }

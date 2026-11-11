@@ -1,6 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import { ZodTypeProvider } from 'fastify-type-provider-zod';
-import { enrollMultiPoseSchema, clockInFaceSchema } from './schemas.js';
+import { enrollMultiPoseSchema, clockInFaceSchema, biometricsStatusQuerySchema } from './schemas.js';
 import { getMultiPoseEnrollmentStatus, matchLiveFaceVector, saveMultiPoseEnrollment } from './service.js';
 
 /**
@@ -13,12 +13,16 @@ export const biometricsRoutes: FastifyPluginAsync = async (fastify) => {
     '/api/v1/biometrics/status',
     {
       preHandler: [fastify.authenticate],
+      schema: {
+        querystring: biometricsStatusQuerySchema,
+      },
     },
     async (request: any, reply: any) => {
       const result = await getMultiPoseEnrollmentStatus(
         fastify,
         request.user.organizationId,
-        request.user.userId
+        request.user.userId,
+        request.query?.employeeProfileId
       );
       return reply.status(200).send(result);
     }

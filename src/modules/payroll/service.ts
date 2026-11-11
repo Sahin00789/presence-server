@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { and, asc, desc, eq, gte, inArray, lte, or, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
-import { findStaffProfile, listOrganizationStaff } from '../../shared/services/staff.service.js';
+import { findStaffProfile, resolveStaffProfile, listOrganizationStaff } from '../../shared/services/staff.service.js';
 import { dayOfWeek, enumerateDates, toDateISO } from '../../shared/utils/datetime.js';
 import { buildPdfReport, PdfTable } from '../../shared/utils/pdf.js';
 
@@ -1638,6 +1638,120 @@ export async function getMyMonthlyEarningLedger(
   };
 }
 
+export async function getStaffMonthlyEarningLedger(
+  fastify: FastifyInstance,
+  organizationId: string,
+  staffProfileId: string,
+  month: number,
+  year: number
+) {
+  const profile = await resolveStaffProfile(fastify, organizationId, staffProfileId);
+  if (!profile || !profile.premisesId) {
+    throw new AppError('Employee profile or assigned premises not found', 404, 'EMPLOYEE_NOT_FOUND');
+  }
+
+  const report = await getOrGenerateMonthlyPayroll(
+    fastify,
+    organizationId,
+    profile.premisesId,
+    profile.id,
+    month,
+    year
+  );
+
+  const r: any = report as any;
+
+  const dailyTotals = await getDailyEarningTotals(
+    fastify,
+    organizationId,
+    profile.id,
+    month,
+    year
+  );
+
+  const rawEntries = await getDailyEarningLedger(
+    fastify,
+    organizationId,
+    profile.id,
+    month,
+    year
+  );
+
+  const payments = await fastify.db
+    .select({
+      id: schema.payrollTransactions.id,
+      amount: schema.payrollTransactions.amount,
+      paymentDate: schema.payrollTransactions.paymentDate,
+      paymentMethod: schema.payrollTransactions.paymentMethod,
+      reference: schema.payrollTransactions.reference,
+    })
+    .from(schema.payrollTransactions)
+    .innerJoin(
+      schema.monthlyPayrolls,
+      eq(schema.monthlyPayrolls.id, schema.payrollTransactions.monthlyPayrollId)
+    )
+    .where(
+      and(
+        eq(schema.monthlyPayrolls.organizationId, organizationId),
+        eq(schema.monthlyPayrolls.employeeId, profile.id),
+        eq(schema.monthlyPayrolls.month, month),
+        eq(schema.monthlyPayrolls.year, year)
+      )
+    )
+    .orderBy(desc(schema.payrollTransactions.paymentDate));
+
+  return {
+    staffProfileId: profile.id,
+    staffName: profile.name,
+    staffCode: profile.employeeCode,
+    premisesId: profile.premisesId,
+    month,
+    year,
+    earnedAmount: r.earnedAmount ?? '0.00',
+    earnedPaise: Math.round(Number(r.earnedAmount ?? 0)),
+    paidAmount: r.paidAmount ?? '0.00',
+    dueAmount: r.dueAmount ?? '0.00',
+    status: r.status ?? 'OPEN',
+    attendanceSummary: r.attendanceSummary ?? {
+      totalDays: 0,
+      presentDays: 0,
+      lateDays: 0,
+      halfDays: 0,
+      absentDays: 0,
+      leaveDays: 0,
+      unpaidLeaveDays: 0,
+      paidLeaveDays: 0,
+      holidayDays: 0,
+      weeklyOffDays: 0,
+      totalWorkedMinutes: 0,
+      totalOvertimeMinutes: 0,
+    },
+    breakdown: r.breakdown ?? { earnings: [] },
+    dailyTotals,
+    entries: rawEntries.map((e: any) => {
+      const inr = Math.round(Number(e.amount) || 0);
+      return {
+        id: e.id,
+        organizationId: e.organizationId,
+        staffProfileId: e.employeeId,
+        type: e.type,
+        amount: String(inr),
+        amountPaise: inr,
+        amountInr: inr,
+        earningDate: e.earningDate,
+        createdAt: e.createdAt,
+      };
+    }),
+    payments: payments.map((p: any) => ({
+      id: p.id,
+      amountPaise: Math.round(Number(p.amount) || 0),
+      paymentDate: p.paymentDate,
+      paymentMethod: p.paymentMethod,
+      referenceNumber: p.reference,
+    })),
+  };
+}
+
 export async function listMyPayslips(
   fastify: FastifyInstance,
   user: { userId: string; organizationId: string },
@@ -1731,10 +1845,11 @@ export async function downloadPayslipPdf(
   query: { month: number; year: number; staffProfileId?: string }
 ) {
   let staffId = query.staffProfileId;
-  if (user.role === 'STAFF' || (user.role === 'MANAGER' && !staffId)) {
+  if (!staffId || user.role === 'EMPLOYEE' || user.role === 'STAFF') {
     const selfProfile = await findStaffProfile(fastify, user.userId, user.organizationId);
-    if (!selfProfile) throw new AppError('Employee profile not found', 404, 'EMPLOYEE_NOT_FOUND');
-    staffId = selfProfile.id;
+    if (selfProfile) {
+      staffId = selfProfile.id;
+    }
   }
   if (!staffId) {
     throw new AppError('staffProfileId is required', 400, 'STAFF_PROFILE_ID_REQUIRED');

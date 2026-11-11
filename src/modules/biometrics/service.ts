@@ -11,11 +11,10 @@ import {
   sanitizePoseVector,
   sanitizePoseVectors,
 } from '../../shared/utils/multi-pose.js';
+import { resolveStaffProfile } from '../../shared/services/staff.service.js';
 import { ClockInFaceInput, EnrollMultiPoseInput } from './schemas.js';
 
 const POSE_CANDIDATES_PER_COLUMN = 5;
-
-import { resolveStaffProfile } from '../../shared/services/staff.service.js';
 
 interface FaceMatchRow {
   employee_id: string;
@@ -26,12 +25,12 @@ interface FaceMatchRow {
   similarity: number | string;
 }
 
-async function assertStaffProfile(
+async function assertEmployeeProfile(
   fastify: FastifyInstance,
   organizationId: string,
-  staffProfileId: string
+  employeeProfileId: string
 ) {
-  return await resolveStaffProfile(fastify, organizationId, staffProfileId);
+  return await resolveStaffProfile(fastify, organizationId, employeeProfileId);
 }
 
 async function assertPremises(
@@ -68,7 +67,7 @@ export async function saveMultiPoseEnrollment(
 ) {
   assertLivenessEvidence(input.liveness);
 
-  const profile = await assertStaffProfile(fastify, organizationId, input.staffProfileId);
+  const profile = await assertEmployeeProfile(fastify, organizationId, input.employeeProfileId);
   await assertPremises(fastify, organizationId, input.premisesId);
 
   const poses = sanitizePoseVectors({
@@ -130,10 +129,7 @@ export async function saveMultiPoseEnrollment(
   return {
     success: true,
     message: 'Multi-pose face vectors enrolled successfully.',
-    employeeId: profile.id,
-    staffProfileId: profile.id,
-    userId: profile.userId,
-    staffCode: profile.employeeCode,
+    employeeProfileId: profile.id,
     modelVersion: input.modelVersion,
     poseCount: 5,
     qualityScore,
@@ -236,12 +232,12 @@ export async function matchLiveFaceVector(
       candidates.similarity,
       employees.user_id,
       employees.employee_code,
-      users.full_name
+      COALESCE(users.full_name, employees.name) AS full_name
     FROM candidates
     INNER JOIN employees
       ON employees.id = candidates.employee_id
       AND employees.organization_id = ${organizationId}::uuid
-    INNER JOIN users ON users.id = employees.user_id
+    LEFT JOIN users ON users.id = employees.user_id
     ORDER BY candidates.similarity DESC
     LIMIT 1
   `;
@@ -264,8 +260,7 @@ export async function matchLiveFaceVector(
     return {
       success: false,
       matched: false,
-      employeeId: null,
-      staffProfileId: null,
+      employeeProfileId: null,
       similarity: Number.isFinite(similarity) ? Number(similarity.toFixed(4)) : 0,
       threshold,
       message: 'No employee matched above the similarity threshold.',
@@ -275,11 +270,9 @@ export async function matchLiveFaceVector(
   return {
     success: true,
     matched: true,
-    employeeId: best.employee_id,
-    staffProfileId: best.employee_id,
-    userId: best.user_id,
-    staffName: best.full_name,
-    staffCode: best.employee_code,
+    employeeProfileId: best.employee_id,
+    employeeName: best.full_name,
+    employeeCode: best.employee_code,
     matchedPose: best.pose,
     similarity: Number(similarity.toFixed(4)),
     threshold,
@@ -290,18 +283,23 @@ export async function matchLiveFaceVector(
 export async function getMultiPoseEnrollmentStatus(
   fastify: FastifyInstance,
   organizationId: string,
-  userId: string
+  userId: string,
+  employeeProfileId?: string
 ) {
+  const whereClause = employeeProfileId
+    ? and(eq(schema.employees.id, employeeProfileId), eq(schema.employees.organizationId, organizationId))
+    : and(eq(schema.employees.userId, userId), eq(schema.employees.organizationId, organizationId));
+
   const [employee] = await fastify.db
     .select({ id: schema.employees.id })
     .from(schema.employees)
-    .where(and(eq(schema.employees.userId, userId), eq(schema.employees.organizationId, organizationId)))
+    .where(whereClause)
     .limit(1);
 
   if (!employee) {
     return {
       enrolled: false,
-      employeeId: null,
+      employeeProfileId: null,
     };
   }
 
@@ -318,13 +316,13 @@ export async function getMultiPoseEnrollmentStatus(
   if (!template || template.revokedAt) {
     return {
       enrolled: false,
-      employeeId: employee.id,
+      employeeProfileId: employee.id,
     };
   }
 
   return {
     enrolled: true,
-    employeeId: employee.id,
+    employeeProfileId: employee.id,
     enrolledAt: template.enrolledAt?.toISOString() ?? null,
     modelVersion: template.modelVersion ?? null,
   };
