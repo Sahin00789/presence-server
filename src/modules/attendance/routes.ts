@@ -8,6 +8,7 @@ import {
   claimUnhandledEventResponseSchema,
   claimUnhandledEventSchema,
   clockInSchema,
+  clockOutSchema,
   dailyAttendanceSchema,
   locationCheckResponseSchema,
   manualMarkOvertimeSchema,
@@ -20,6 +21,7 @@ import {
   claimUnhandledEvent,
   clockInOvertime,
   clockInShift,
+  clockOut,
   correctOvertimeAttendance,
   correctShiftAttendance,
   getDailyAttendanceByDateAndPremises,
@@ -83,6 +85,31 @@ export async function attendanceRoutes(fastify: FastifyInstance) {
         request.user.userId,
         request.user.organizationId,
         request.body
+      );
+      return reply.send(toPublicAttendanceEvent(result));
+    }
+  );
+
+  // Clock-Out Route
+  server.post(
+    '/api/v1/attendance/clock-out',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('EMPLOYEE')],
+      schema: {
+        description: 'Clock out of active shift or overtime',
+        tags: ['Attendance'],
+        body: clockOutSchema,
+        response: {
+          200: attendanceEventSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const result = await clockOut(
+        fastify,
+        request.user.userId,
+        request.user.organizationId,
+        request.body as any
       );
       return reply.send(toPublicAttendanceEvent(result));
     }

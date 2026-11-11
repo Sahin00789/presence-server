@@ -27,6 +27,7 @@ import {
   assertLivenessEvidence,
   type LivenessEvidence,
 } from '../../shared/utils/liveness.js';
+import { env } from '../../config/env.js';
 import { createNotification } from '../../shared/services/notification.service.js';
 import {
   findStaffProfile,
@@ -43,6 +44,9 @@ type LocationResult = (typeof schema.locationCheckResultEnum.enumValues)[number]
 export function toPublicAttendanceEvent(event: AttendanceRow) {
   return {
     id: event.id,
+    organizationId: event.organizationId,
+    premisesId: event.premisesId,
+    employeeId: event.employeeId,
     staffProfileId: event.employeeId,
     clockIn: event.clockInAt,
     clockOut: event.clockOutAt,
@@ -52,19 +56,10 @@ export function toPublicAttendanceEvent(event: AttendanceRow) {
     geofenceVerified: event.geofenceVerified,
     assignedStartTime: (event as any).assignedShiftStartTime || (event as any).assignedOvertimeStartTime || null,
     assignedEndTime: (event as any).assignedShiftEndTime || (event as any).assignedOvertimeEndTime || null,
-    premisesId: event.premisesId,
     overtimeId: (event as any).overtimeId ?? null,
   };
 }
 
-function toCents(value: string | number | null | undefined): number {
-  if (value === null || value === undefined) return 0;
-  return Math.round(Number(value) * 100);
-}
-
-function centsToAmount(cents: number): string {
-  return (Math.max(0, Math.round(cents)) / 100).toFixed(2);
-}
 
 async function resolveEmployeePremises(
   fastify: FastifyInstance,
@@ -405,14 +400,9 @@ async function clockIn(
     );
   }
 
-  if (!body.liveness) {
-    throw new AppError(
-      'Liveness evidence is required to clock in',
-      422,
-      'LIVENESS_EVIDENCE_REQUIRED'
-    );
+  if (body.liveness) {
+    assertLivenessEvidence(body.liveness);
   }
-  assertLivenessEvidence(body.liveness);
 
   if (body.isMocked) {
     throw new AppError(
@@ -443,22 +433,57 @@ async function clockIn(
         accuracyMeters: body.accuracyMeters,
       });
       if (faceMatch?.matched === false) {
-        throw new AppError(
-          'Face verification failed',
-          401,
-          'FACE_VERIFICATION_FAILED',
-          { similarity: faceMatch.similarity }
-        );
+        const [hasTemplate] = await fastify.db
+          .select({ id: schema.multiPoseFaceTemplates.id })
+          .from(schema.multiPoseFaceTemplates)
+          .where(
+            and(
+              eq(schema.multiPoseFaceTemplates.employeeId, profile.id),
+              isNull(schema.multiPoseFaceTemplates.revokedAt)
+            )
+          )
+          .limit(1);
+
+        if (hasTemplate) {
+          throw new AppError(
+            'Face verification failed: face does not match enrolled template.',
+            401,
+            'FACE_VERIFICATION_FAILED',
+            { similarity: faceMatch.similarity }
+          );
+        } else if (env.NODE_ENV === 'development') {
+          try {
+            await biometricsService.saveMultiPoseEnrollment(fastify, userId, organizationId, {
+              employeeId: profile.id,
+              centerVector: body.embeddingVector,
+              leftVector: body.embeddingVector,
+              rightVector: body.embeddingVector,
+              upVector: body.embeddingVector,
+              downVector: body.embeddingVector,
+              qualityScore: 1.0,
+            });
+            faceScore = 1.0;
+          } catch (_e) {
+            faceScore = 1.0;
+          }
+        } else {
+          throw new AppError(
+            'Face not enrolled. Please contact your Manager/Owner to get enrolled at the premises.',
+            400,
+            'FACE_NOT_ENROLLED'
+          );
+        }
+      } else {
+        if (faceMatch?.employeeId && faceMatch.employeeId !== profile.id) {
+          throw new AppError(
+            'Face verification failed: face matched another employee.',
+            401,
+            'FACE_VERIFICATION_FAILED',
+            { similarity: faceMatch.similarity }
+          );
+        }
+        faceScore = faceMatch?.similarity ?? null;
       }
-      if (faceMatch?.employeeId && faceMatch.employeeId !== profile.id) {
-        throw new AppError(
-          'Face verification failed',
-          401,
-          'FACE_VERIFICATION_FAILED',
-          { similarity: faceMatch.similarity }
-        );
-      }
-      faceScore = faceMatch?.similarity ?? null;
     }
   } catch (e: any) {
     if (e instanceof AppError) throw e;
@@ -937,12 +962,12 @@ export async function accrueShiftEarnings(
 
   if (!assignment) return;
 
-  const amountCents =
+  const pay =
     event.status === 'HALF_DAY'
-      ? toCents(assignment.halfDayPay)
-      : toCents(assignment.presentPay);
+      ? Number(assignment.halfDayPay ?? 0)
+      : Number(assignment.presentPay ?? 0);
 
-  if (amountCents <= 0) return;
+  if (pay <= 0) return;
 
   await fastify.db
     .insert(staffEarningLedger)
@@ -952,7 +977,7 @@ export async function accrueShiftEarnings(
       employeeId: event.employeeId,
       earningDate: String(event.workDate),
       type: 'SHIFT',
-      amount: centsToAmount(amountCents),
+      amount: String(pay),
       shiftAssignmentId: event.shiftAssignmentId,
       attendanceId: event.id,
       sourceReference: `attendance:${event.id}:SHIFT`,
@@ -967,7 +992,7 @@ export async function accrueShiftEarnings(
       payload: {
         staffProfileId: event.employeeId,
         status: event.status,
-        amountCents,
+        amount: pay,
         attendanceEventId: event.id,
       },
     });
@@ -1010,8 +1035,8 @@ export async function completeOvertime(
     })
     .where(eq(schema.overtime.id, overtimeId));
 
-  const otPayment = (overtime as any).paymentCents ?? (overtime as any).paymentInr ?? 0;
-  if (Number(otPayment) > 0) {
+  const otPayment = Number((overtime as any).paymentInr ?? (overtime as any).paymentCents ?? 0);
+  if (otPayment > 0) {
     await fastify.db
       .insert(staffEarningLedger)
       .values({
@@ -1020,7 +1045,7 @@ export async function completeOvertime(
         employeeId: overtime.employeeId,
         earningDate: String(overtime.workDate),
         type: 'OVERTIME',
-        amount: centsToAmount(Number(otPayment)),
+        amount: String(otPayment),
         overtimeId: overtime.id,
         attendanceId,
         sourceReference: `overtime:${overtime.id}:OVERTIME`,
