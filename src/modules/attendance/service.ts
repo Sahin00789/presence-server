@@ -2367,7 +2367,6 @@ export async function getUnhandledEvents(
   const timezone = await resolveTimezone(fastify, organizationId);
   const now = new Date();
   const today = toDateISOInTimeZone(now, timezone);
-  const from = addDays(today, -14);
 
   // 1. Shift assignments for this employee
   const assignments = await fastify.db
@@ -2394,9 +2393,87 @@ export async function getUnhandledEvents(
       )
     );
 
-  const employeeStartDate = profile.createdAt ? toDateISOInTimeZone(profile.createdAt, timezone) : from;
+  // 2. Unworked payment rules for HOLIDAY and WEEKLY_OFF
+  const [holidayRule] = await fastify.db
+    .select({
+      id: schema.unworkedPaymentRules.id,
+      paymentInr: schema.unworkedPaymentRules.paymentInr,
+      createdAt: schema.unworkedPaymentRules.createdAt,
+    })
+    .from(schema.unworkedPaymentRules)
+    .where(
+      and(
+        eq(schema.unworkedPaymentRules.organizationId, organizationId),
+        eq(schema.unworkedPaymentRules.dayType, 'HOLIDAY'),
+        sql`(${schema.unworkedPaymentRules.employeeId} = ${profile.id} OR ${schema.unworkedPaymentRules.employeeId} IS NULL)`,
+        premisesId
+          ? sql`(${schema.unworkedPaymentRules.premisesId} = ${premisesId} OR ${schema.unworkedPaymentRules.premisesId} IS NULL)`
+          : sql`${schema.unworkedPaymentRules.premisesId} IS NULL`
+      )
+    )
+    .orderBy(
+      sql`CASE WHEN ${schema.unworkedPaymentRules.employeeId} IS NOT NULL THEN 0 ELSE 1 END`,
+      sql`CASE WHEN ${schema.unworkedPaymentRules.premisesId} IS NOT NULL THEN 0 ELSE 1 END`,
+      desc(schema.unworkedPaymentRules.createdAt)
+    )
+    .limit(1);
 
-  // 2. Existing earnings in ledger for this employee
+  const [weeklyOffRule] = await fastify.db
+    .select({
+      id: schema.unworkedPaymentRules.id,
+      paymentInr: schema.unworkedPaymentRules.paymentInr,
+      createdAt: schema.unworkedPaymentRules.createdAt,
+    })
+    .from(schema.unworkedPaymentRules)
+    .where(
+      and(
+        eq(schema.unworkedPaymentRules.organizationId, organizationId),
+        eq(schema.unworkedPaymentRules.dayType, 'WEEKLY_OFF'),
+        sql`(${schema.unworkedPaymentRules.employeeId} = ${profile.id} OR ${schema.unworkedPaymentRules.employeeId} IS NULL)`,
+        premisesId
+          ? sql`(${schema.unworkedPaymentRules.premisesId} = ${premisesId} OR ${schema.unworkedPaymentRules.premisesId} IS NULL)`
+          : sql`${schema.unworkedPaymentRules.premisesId} IS NULL`
+      )
+    )
+    .orderBy(
+      sql`CASE WHEN ${schema.unworkedPaymentRules.employeeId} IS NOT NULL THEN 0 ELSE 1 END`,
+      sql`CASE WHEN ${schema.unworkedPaymentRules.premisesId} IS NOT NULL THEN 0 ELSE 1 END`,
+      desc(schema.unworkedPaymentRules.createdAt)
+    )
+    .limit(1);
+
+  const employeeStartDate = profile.createdAt ? toDateISOInTimeZone(profile.createdAt, timezone) : null;
+
+  // Unhandled attendance events start from:
+  // - shift assigned date (for leaves and absent/missed shifts)
+  // - unworkpaymentrules date (for holiday and weekly off)
+  const assignmentStartDates = assignments
+    .map((a) => toDateISOInTimeZone(a.createdAt, timezone))
+    .filter((d): d is string => Boolean(d));
+  const minAssignmentDate = assignmentStartDates.length > 0 ? [...assignmentStartDates].sort()[0] : null;
+
+  const holidayRuleDate = holidayRule?.createdAt ? toDateISOInTimeZone(holidayRule.createdAt, timezone) : null;
+  const weeklyOffRuleDate = weeklyOffRule?.createdAt ? toDateISOInTimeZone(weeklyOffRule.createdAt, timezone) : null;
+
+  const validStartDates = [minAssignmentDate, holidayRuleDate, weeklyOffRuleDate].filter(
+    (d): d is string => Boolean(d)
+  );
+
+  // If there are no assigned shifts and no unworked payment rules, no unhandled events exist
+  if (validStartDates.length === 0) {
+    return { events: [], totalPending: 0 };
+  }
+
+  let from = [...validStartDates].sort()[0];
+  if (employeeStartDate && employeeStartDate > from) {
+    from = employeeStartDate;
+  }
+
+  if (from > today) {
+    return { events: [], totalPending: 0 };
+  }
+
+  // 3. Existing earnings in ledger for this employee
   const existingEarnings = await fastify.db
     .select({
       id: schema.employeeEarningLedger.id,
@@ -2424,7 +2501,7 @@ export async function getUnhandledEvents(
     existingEarnings.filter((e) => e.type === 'SHIFT').map((e) => e.sourceReference ?? '')
   );
 
-  // 3. Existing attendance records
+  // 4. Existing attendance records
   const attendanceRecords = await fastify.db
     .select()
     .from(schema.employeeAttendance)
@@ -2445,39 +2522,45 @@ export async function getUnhandledEvents(
     attendanceRecords.map((r) => [`${r.shiftAssignmentId}::${toYmd(r.workDate)}`, r])
   );
 
-  // 4. Holidays for premises
-  const holidays = await fastify.db
-    .select()
-    .from(schema.holidayCalendars)
-    .where(
-      and(
-        eq(schema.holidayCalendars.organizationId, organizationId),
-        premisesId ? eq(schema.holidayCalendars.premisesId, premisesId) : sql`true`,
-        gte(schema.holidayCalendars.date, from),
-        lte(schema.holidayCalendars.date, today)
-      )
-    );
+  // 5. Holidays for premises (only needed if holiday rule exists)
+  const holidays = holidayRule
+    ? await fastify.db
+        .select()
+        .from(schema.holidayCalendars)
+        .where(
+          and(
+            eq(schema.holidayCalendars.organizationId, organizationId),
+            premisesId ? eq(schema.holidayCalendars.premisesId, premisesId) : sql`true`,
+            gte(schema.holidayCalendars.date, from),
+            lte(schema.holidayCalendars.date, today)
+          )
+        )
+    : [];
   const holidayByDate = new Map(holidays.map((h) => [toYmd(h.date), h]));
 
-  // 5. Weekly offs for employee
-  const weeklyOffRows = await fastify.db
-    .select({ dayOfWeek: schema.weeklyOffs.dayOfWeek })
-    .from(schema.weeklyOffs)
-    .where(eq(schema.weeklyOffs.employeeId, profile.id));
+  // 6. Weekly offs for employee (only needed if weekly off rule exists)
+  const weeklyOffRows = weeklyOffRule
+    ? await fastify.db
+        .select({ dayOfWeek: schema.weeklyOffs.dayOfWeek })
+        .from(schema.weeklyOffs)
+        .where(eq(schema.weeklyOffs.employeeId, profile.id))
+    : [];
   const weeklyOffDows = new Set(weeklyOffRows.map((w) => w.dayOfWeek));
 
-  // 6. Approved leave requests
-  const approvedLeaves = await fastify.db
-    .select()
-    .from(schema.leaveRequests)
-    .where(
-      and(
-        eq(schema.leaveRequests.employeeId, profile.id),
-        eq(schema.leaveRequests.status, 'APPROVED'),
-        gte(schema.leaveRequests.workDate, from),
-        lte(schema.leaveRequests.workDate, today)
-      )
-    );
+  // 7. Approved leave requests
+  const approvedLeaves = assignments.length > 0
+    ? await fastify.db
+        .select()
+        .from(schema.leaveRequests)
+        .where(
+          and(
+            eq(schema.leaveRequests.employeeId, profile.id),
+            eq(schema.leaveRequests.status, 'APPROVED'),
+            gte(schema.leaveRequests.workDate, from),
+            lte(schema.leaveRequests.workDate, today)
+          )
+        )
+    : [];
   const leaveByAssignmentAndDate = new Map(
     approvedLeaves.map((l) => [`${l.shiftAssignmentId}::${toYmd(l.workDate)}`, l])
   );
@@ -2496,66 +2579,66 @@ export async function getUnhandledEvents(
   for (const date of dates) {
     const dow = dayOfWeek(date);
 
-    // A. Check Holiday
-    const holiday = holidayByDate.get(date);
-    if (holiday && holiday.isPaid !== false) {
-      if (!holidayEarnedDates.has(date) && !workedDates.has(date)) {
-        const amt = await getUnworkedPaymentAmount(
-          fastify,
-          organizationId,
-          premisesId ?? profile.premisesId,
-          profile.id,
-          'HOLIDAY'
-        );
-        events.push({
-          id: `holiday:${holiday.id}:${date}`,
-          type: 'HOLIDAY',
-          date,
-          title: `Holiday: ${holiday.name}`,
-          subtitle: `Paid holiday on ${dayNames[dow]}, ${date}`,
-          amount: amt,
-          currency: 'INR',
-          actionLabel: `Claim ₹${amt} for Public Holiday`,
-          metadata: {
-            holidayId: holiday.id,
-            holidayName: holiday.name,
-          },
-        });
-        continue;
+    // A. Check Holiday (starts from unworkedpaymentrules date)
+    if (holidayRule && holidayRuleDate && date >= holidayRuleDate && (!employeeStartDate || date >= employeeStartDate)) {
+      const holiday = holidayByDate.get(date);
+      if (holiday && holiday.isPaid !== false) {
+        if (!holidayEarnedDates.has(date) && !workedDates.has(date)) {
+          const amt = Number(holidayRule.paymentInr ?? 0);
+          events.push({
+            id: `holiday:${holiday.id}:${date}`,
+            type: 'HOLIDAY',
+            date,
+            title: `Holiday: ${holiday.name}`,
+            subtitle: `Paid holiday on ${dayNames[dow]}, ${date}`,
+            amount: amt,
+            currency: 'INR',
+            actionLabel: amt > 0 ? `Claim ₹${amt} for Public Holiday` : 'Confirm Public Holiday',
+            metadata: {
+              holidayId: holiday.id,
+              holidayName: holiday.name,
+            },
+          });
+          continue;
+        }
       }
     }
 
-    // B. Check Weekly Off
-    const isWeeklyOffDay = weeklyOffDows.size > 0 ? weeklyOffDows.has(dow) : !assignedDowSet.has(dow);
-    if (isWeeklyOffDay && !assignedDowSet.has(dow) && !workedDates.has(date)) {
-      if (!offDayEarnedDates.has(date)) {
-        const amt = await getUnworkedPaymentAmount(
-          fastify,
-          organizationId,
-          premisesId ?? profile.premisesId,
-          profile.id,
-          'WEEKLY_OFF'
-        );
-        events.push({
-          id: `weekly_off:${profile.id}:${date}`,
-          type: 'WEEKLY_OFF',
-          date,
-          title: 'Weekly Off',
-          subtitle: `Scheduled rest day (${dayNames[dow]}, ${date})`,
-          amount: amt,
-          currency: 'INR',
-          actionLabel: `Claim ₹${amt} for Weekly Off`,
-          metadata: {
-            dayOfWeek: String(dow),
-            dayName: dayNames[dow],
-          },
-        });
-        continue;
+    // B. Check Weekly Off (starts from unworkedpaymentrules date)
+    if (weeklyOffRule && weeklyOffRuleDate && date >= weeklyOffRuleDate && (!employeeStartDate || date >= employeeStartDate)) {
+      const isWeeklyOffDay = weeklyOffDows.size > 0 ? weeklyOffDows.has(dow) : !assignedDowSet.has(dow);
+      if (isWeeklyOffDay && !assignedDowSet.has(dow) && !workedDates.has(date)) {
+        if (!offDayEarnedDates.has(date)) {
+          const amt = Number(weeklyOffRule.paymentInr ?? 0);
+          events.push({
+            id: `weekly_off:${profile.id}:${date}`,
+            type: 'WEEKLY_OFF',
+            date,
+            title: 'Weekly Off',
+            subtitle: `Scheduled rest day (${dayNames[dow]}, ${date})`,
+            amount: amt,
+            currency: 'INR',
+            actionLabel: amt > 0 ? `Claim ₹${amt} for Weekly Off` : 'Confirm Weekly Off',
+            metadata: {
+              dayOfWeek: String(dow),
+              dayName: dayNames[dow],
+            },
+          });
+          continue;
+        }
       }
     }
 
-    // C. Check Shifts & Leaves on this date
+    // C. Check Shifts & Leaves on this date (starts from shift assigned date)
     for (const assignment of assignments) {
+      const assignmentDate = toDateISOInTimeZone(assignment.createdAt, timezone);
+      if (date < assignmentDate) {
+        continue;
+      }
+      if (employeeStartDate && date < employeeStartDate) {
+        continue;
+      }
+
       const appliesToDow = getAssignedDayNumbers(assignment.dayName).includes(dow);
       if (!appliesToDow) continue;
 
@@ -2594,7 +2677,7 @@ export async function getUnhandledEvents(
         timezone
       );
 
-      if (now.getTime() >= shiftWindow.endAt.getTime()) {
+      if (now.getTime() >= shiftWindow.endAt.getTime() && assignment.createdAt.getTime() <= shiftWindow.startAt.getTime()) {
         const att = attendanceByAssignmentAndDate.get(`${assignment.assignmentId}::${date}`);
         const clockedIn = att?.clockInAt !== null || ['PRESENT', 'HALF_DAY'].includes(att?.status ?? '');
         if (!clockedIn) {
@@ -2669,13 +2752,40 @@ export async function claimUnhandledEvent(
   let earnedAmount = 0;
 
   if (body.type === 'WEEKLY_OFF') {
-    earnedAmount = await getUnworkedPaymentAmount(
-      fastify,
-      organizationId,
-      premisesId,
-      profile.id,
-      'WEEKLY_OFF'
-    );
+    const [weeklyOffRule] = await fastify.db
+      .select({
+        id: schema.unworkedPaymentRules.id,
+        paymentInr: schema.unworkedPaymentRules.paymentInr,
+        createdAt: schema.unworkedPaymentRules.createdAt,
+      })
+      .from(schema.unworkedPaymentRules)
+      .where(
+        and(
+          eq(schema.unworkedPaymentRules.organizationId, organizationId),
+          eq(schema.unworkedPaymentRules.dayType, 'WEEKLY_OFF'),
+          sql`(${schema.unworkedPaymentRules.employeeId} = ${profile.id} OR ${schema.unworkedPaymentRules.employeeId} IS NULL)`,
+          premisesId
+            ? sql`(${schema.unworkedPaymentRules.premisesId} = ${premisesId} OR ${schema.unworkedPaymentRules.premisesId} IS NULL)`
+            : sql`${schema.unworkedPaymentRules.premisesId} IS NULL`
+        )
+      )
+      .orderBy(
+        sql`CASE WHEN ${schema.unworkedPaymentRules.employeeId} IS NOT NULL THEN 0 ELSE 1 END`,
+        sql`CASE WHEN ${schema.unworkedPaymentRules.premisesId} IS NOT NULL THEN 0 ELSE 1 END`,
+        desc(schema.unworkedPaymentRules.createdAt)
+      )
+      .limit(1);
+
+    if (!weeklyOffRule) {
+      throw new AppError('No unworked payment rule configured for weekly off', 400, 'UNWORKED_RULE_NOT_FOUND');
+    }
+    const timezone = await resolveTimezone(fastify, organizationId);
+    const ruleDate = toDateISOInTimeZone(weeklyOffRule.createdAt, timezone);
+    if (cleanDate < ruleDate) {
+      throw new AppError('Cannot claim weekly off prior to rule creation date', 400, 'CLAIM_DATE_BEFORE_RULE');
+    }
+
+    earnedAmount = Number(weeklyOffRule.paymentInr ?? 0);
     if (earnedAmount > 0) {
       await fastify.db
         .insert(schema.employeeEarningLedger)
@@ -2691,13 +2801,40 @@ export async function claimUnhandledEvent(
         .onConflictDoNothing();
     }
   } else if (body.type === 'HOLIDAY') {
-    earnedAmount = await getUnworkedPaymentAmount(
-      fastify,
-      organizationId,
-      premisesId,
-      profile.id,
-      'HOLIDAY'
-    );
+    const [holidayRule] = await fastify.db
+      .select({
+        id: schema.unworkedPaymentRules.id,
+        paymentInr: schema.unworkedPaymentRules.paymentInr,
+        createdAt: schema.unworkedPaymentRules.createdAt,
+      })
+      .from(schema.unworkedPaymentRules)
+      .where(
+        and(
+          eq(schema.unworkedPaymentRules.organizationId, organizationId),
+          eq(schema.unworkedPaymentRules.dayType, 'HOLIDAY'),
+          sql`(${schema.unworkedPaymentRules.employeeId} = ${profile.id} OR ${schema.unworkedPaymentRules.employeeId} IS NULL)`,
+          premisesId
+            ? sql`(${schema.unworkedPaymentRules.premisesId} = ${premisesId} OR ${schema.unworkedPaymentRules.premisesId} IS NULL)`
+            : sql`${schema.unworkedPaymentRules.premisesId} IS NULL`
+        )
+      )
+      .orderBy(
+        sql`CASE WHEN ${schema.unworkedPaymentRules.employeeId} IS NOT NULL THEN 0 ELSE 1 END`,
+        sql`CASE WHEN ${schema.unworkedPaymentRules.premisesId} IS NOT NULL THEN 0 ELSE 1 END`,
+        desc(schema.unworkedPaymentRules.createdAt)
+      )
+      .limit(1);
+
+    if (!holidayRule) {
+      throw new AppError('No unworked payment rule configured for holiday', 400, 'UNWORKED_RULE_NOT_FOUND');
+    }
+    const timezone = await resolveTimezone(fastify, organizationId);
+    const ruleDate = toDateISOInTimeZone(holidayRule.createdAt, timezone);
+    if (cleanDate < ruleDate) {
+      throw new AppError('Cannot claim holiday prior to rule creation date', 400, 'CLAIM_DATE_BEFORE_RULE');
+    }
+
+    earnedAmount = Number(holidayRule.paymentInr ?? 0);
     const holidayId = body.metadata?.holidayId ?? body.eventId.split(':')[1] ?? 'holiday';
     if (earnedAmount > 0) {
       await fastify.db
@@ -2718,6 +2855,25 @@ export async function claimUnhandledEvent(
     const leaveRequestId = body.metadata?.leaveRequestId;
     const reason = body.metadata?.reason ?? 'Approved Leave';
 
+    const [assignment] = await fastify.db
+      .select({
+        id: schema.employeeShiftAssignments.id,
+        leavePay: schema.employeeShiftAssignments.leavePay,
+        createdAt: schema.employeeShiftAssignments.createdAt,
+      })
+      .from(schema.employeeShiftAssignments)
+      .where(eq(schema.employeeShiftAssignments.id, shiftAssignmentId))
+      .limit(1);
+
+    if (!assignment) {
+      throw new AppError('Shift assignment not found', 404, 'SHIFT_ASSIGNMENT_NOT_FOUND');
+    }
+    const timezone = await resolveTimezone(fastify, organizationId);
+    const assignDate = toDateISOInTimeZone(assignment.createdAt, timezone);
+    if (cleanDate < assignDate) {
+      throw new AppError('Cannot claim leave prior to shift assignment date', 400, 'CLAIM_DATE_BEFORE_ASSIGNMENT');
+    }
+
     const [existingAtt] = await fastify.db
       .select()
       .from(schema.employeeAttendance)
@@ -2756,13 +2912,7 @@ export async function claimUnhandledEvent(
         .where(eq(schema.employeeAttendance.id, existingAtt.id));
     }
 
-    const [assignment] = await fastify.db
-      .select({ leavePay: schema.employeeShiftAssignments.leavePay })
-      .from(schema.employeeShiftAssignments)
-      .where(eq(schema.employeeShiftAssignments.id, shiftAssignmentId))
-      .limit(1);
-
-    earnedAmount = Number(assignment?.leavePay ?? 0);
+    earnedAmount = Number(assignment.leavePay ?? 0);
     if (earnedAmount > 0) {
       await fastify.db
         .insert(schema.employeeEarningLedger)
@@ -2782,6 +2932,25 @@ export async function claimUnhandledEvent(
   } else if (body.type === 'ABSENT') {
     const shiftAssignmentId = body.metadata?.shiftAssignmentId ?? body.eventId.split(':')[1];
 
+    const [assignment] = await fastify.db
+      .select({
+        id: schema.employeeShiftAssignments.id,
+        absentPay: schema.employeeShiftAssignments.absentPay,
+        createdAt: schema.employeeShiftAssignments.createdAt,
+      })
+      .from(schema.employeeShiftAssignments)
+      .where(eq(schema.employeeShiftAssignments.id, shiftAssignmentId))
+      .limit(1);
+
+    if (!assignment) {
+      throw new AppError('Shift assignment not found', 404, 'SHIFT_ASSIGNMENT_NOT_FOUND');
+    }
+    const timezone = await resolveTimezone(fastify, organizationId);
+    const assignDate = toDateISOInTimeZone(assignment.createdAt, timezone);
+    if (cleanDate < assignDate) {
+      throw new AppError('Cannot acknowledge absent prior to shift assignment date', 400, 'CLAIM_DATE_BEFORE_ASSIGNMENT');
+    }
+
     const [existingAtt] = await fastify.db
       .select()
       .from(schema.employeeAttendance)
@@ -2820,13 +2989,7 @@ export async function claimUnhandledEvent(
         .where(eq(schema.employeeAttendance.id, existingAtt.id));
     }
 
-    const [assignment] = await fastify.db
-      .select({ absentPay: schema.employeeShiftAssignments.absentPay })
-      .from(schema.employeeShiftAssignments)
-      .where(eq(schema.employeeShiftAssignments.id, shiftAssignmentId))
-      .limit(1);
-
-    earnedAmount = Number(assignment?.absentPay ?? 0);
+    earnedAmount = Number(assignment.absentPay ?? 0);
     if (earnedAmount !== 0) {
       await fastify.db
         .insert(schema.employeeEarningLedger)
