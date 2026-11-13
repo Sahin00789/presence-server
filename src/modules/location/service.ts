@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { and, eq, inArray, ne } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, ne } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { getAssignedDayNumbers } from '../shifts/service.js';
 
@@ -301,9 +301,11 @@ export async function getActiveLocationSession(
       and(
         eq(schema.employeeAttendance.organizationId, organizationId),
         eq(schema.employeeAttendance.employeeId, employee.id),
-        eq(schema.employeeAttendance.workDate, todayStr)
+        isNull(schema.employeeAttendance.clockOutAt),
+        isNotNull(schema.employeeAttendance.clockInAt)
       )
     )
+    .orderBy(desc(schema.employeeAttendance.clockInAt))
     .limit(1);
 
   const isActive = Boolean(att && att.clockInAt && !att.clockOutAt);

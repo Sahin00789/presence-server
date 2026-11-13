@@ -2077,6 +2077,30 @@ export async function submitShiftLocationCheck(
     .limit(1);
 
   if (!event) {
+    const [otEvent] = await fastify.db
+      .select()
+      .from(schema.employeeOvertimeAttendance)
+      .where(
+        and(
+          eq(schema.employeeOvertimeAttendance.id, targetId),
+          eq(schema.employeeOvertimeAttendance.organizationId, organizationId)
+        )
+      )
+      .limit(1);
+
+    if (otEvent) {
+      return submitOvertimeLocationCheck(fastify, userId, organizationId, {
+        overtimeAttendanceId: targetId,
+        attendanceEventId: targetId,
+        latitude: body.latitude,
+        longitude: body.longitude,
+        accuracyMeters: body.accuracyMeters,
+        isMock: body.isMock,
+        timestamp: body.timestamp,
+        clientRequestId: body.clientRequestId,
+      });
+    }
+
     throw new AppError('Shift attendance event not found', 404, 'ATTENDANCE_EVENT_NOT_FOUND');
   }
 
