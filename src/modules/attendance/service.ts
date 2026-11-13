@@ -1136,20 +1136,23 @@ export async function listAttendanceRecords(
   query: {
     from?: string;
     to?: string;
+    employeeProfileId?: string;
     staffProfileId?: string;
     limit?: number;
     offset?: number;
   }
 ) {
+  const targetId = query.employeeProfileId ?? query.staffProfileId;
+
   const conditions = [
-    eq(schema.employeeAttendance.organizationId, organizationId),
+    eq(schema.employeeShiftAttendance.organizationId, organizationId),
     or(
-      isNotNull(schema.employeeAttendance.clockInAt),
-      inArray(schema.employeeAttendance.status, ['PRESENT', 'HALF_DAY', 'ABSENT', 'LEAVE'])
+      isNotNull(schema.employeeShiftAttendance.clockInAt),
+      inArray(schema.employeeShiftAttendance.status, ['PRESENT', 'HALF_DAY', 'ABSENT', 'LEAVE'])
     ),
   ];
 
-  if (query.staffProfileId) {
+  if (targetId) {
     const [emp] = await fastify.db
       .select({ id: schema.employees.id })
       .from(schema.employees)
@@ -1157,36 +1160,37 @@ export async function listAttendanceRecords(
         and(
           eq(schema.employees.organizationId, organizationId),
           or(
-            eq(schema.employees.id, query.staffProfileId),
-            eq(schema.employees.userId, query.staffProfileId)
+            eq(schema.employees.id, targetId),
+            eq(schema.employees.userId, targetId)
           )
         )
       )
       .limit(1);
 
     if (emp) {
-      conditions.push(eq(schema.employeeAttendance.employeeId, emp.id));
+      conditions.push(eq(schema.employeeShiftAttendance.employeeId, emp.id));
     } else {
-      conditions.push(eq(schema.employeeAttendance.employeeId, query.staffProfileId));
+      conditions.push(eq(schema.employeeShiftAttendance.employeeId, targetId));
     }
   } else if (user.role === 'EMPLOYEE') {
     const profile = await findStaffProfile(fastify, user.userId, organizationId);
     if (profile) {
-      conditions.push(eq(schema.employeeAttendance.employeeId, profile.id));
+      conditions.push(eq(schema.employeeShiftAttendance.employeeId, profile.id));
     }
   }
 
   if (query.from) {
-    conditions.push(gte(schema.employeeAttendance.workDate, query.from));
+    conditions.push(gte(schema.employeeShiftAttendance.workDate, query.from));
   }
   if (query.to) {
-    conditions.push(lte(schema.employeeAttendance.workDate, query.to));
+    conditions.push(lte(schema.employeeShiftAttendance.workDate, query.to));
   }
 
   const rows = await fastify.db
     .select({
       event: schema.employeeShiftAttendance,
-      staffName: schema.users.fullName,
+      employeeName: schema.employees.name,
+      userFullName: schema.users.fullName,
       staffEmail: schema.users.email,
       staffCode: schema.employees.employeeCode,
       shiftName: schema.shifts.shiftName,
@@ -1198,7 +1202,7 @@ export async function listAttendanceRecords(
       schema.employees,
       eq(schema.employees.id, schema.employeeShiftAttendance.employeeId)
     )
-    .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
+    .leftJoin(schema.users, eq(schema.users.id, schema.employees.userId))
     .leftJoin(
       schema.employeeShiftAssignments,
       eq(schema.employeeShiftAssignments.id, schema.employeeShiftAttendance.shiftAssignmentId)
@@ -1212,7 +1216,7 @@ export async function listAttendanceRecords(
       desc(schema.employeeShiftAttendance.workDate),
       desc(schema.employeeShiftAttendance.clockInAt)
     )
-    .limit(query.limit ?? 100)
+    .limit(query.limit ?? 500)
     .offset(query.offset ?? 0);
 
   return rows.map((r) => {
@@ -1238,22 +1242,24 @@ export async function listAttendanceRecords(
       organizationId: r.event.organizationId,
       premisesId: r.event.premisesId,
       employeeId: r.event.employeeId,
+      employeeProfileId: r.event.employeeId,
       staffProfileId: r.event.employeeId,
-      staffName: r.staffName,
-      staffEmail: r.staffEmail,
-      staffCode: r.staffCode,
+      staffName: r.userFullName || r.employeeName || 'Employee',
+      staffEmail: r.staffEmail || '',
+      staffCode: r.staffCode || '',
       workDate: String(r.event.workDate),
-      clockIn: r.event.clockInAt,
-      clockOut: r.event.clockOutAt,
+      clockIn: r.event.clockInAt ? new Date(r.event.clockInAt).toISOString() : null,
+      clockOut: r.event.clockOutAt ? new Date(r.event.clockOutAt).toISOString() : null,
       status: r.event.status,
       attendanceType: 'SHIFT',
       shiftName: r.shiftName || 'Shift Session',
-      assignedStartTime,
-      assignedEndTime: r.event.assignedShiftEndTime || r.shiftEndTime,
-      faceVerified: r.event.faceVerified,
-      geofenceVerified: r.event.geofenceVerified,
+      assignedStartTime: r.event.assignedShiftStartTime || r.shiftStartTime || null,
+      assignedEndTime: r.event.assignedShiftEndTime || r.shiftEndTime || null,
+      outsidePingCount: r.event.outsidePingCount ?? 0,
+      faceVerified: Boolean(r.event.faceVerified),
+      geofenceVerified: Boolean(r.event.geofenceVerified),
       lateMinutes,
-      overtimeId: null,
+      createdAt: r.event.createdAt ? new Date(r.event.createdAt).toISOString() : null,
     };
   });
 }

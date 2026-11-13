@@ -274,7 +274,8 @@ export async function buildPayrollReport(
   const [item] = await fastify.db
     .select({
       staffCode: schema.employees.employeeCode,
-      staffName: schema.users.fullName,
+      employeeName: schema.employees.name,
+      userFullName: schema.users.fullName,
       earnedAmount: schema.monthlyPayrolls.earnedAmount,
       paidAmount: schema.monthlyPayrolls.paidAmount,
       dueAmount: schema.monthlyPayrolls.dueAmount,
@@ -285,7 +286,7 @@ export async function buildPayrollReport(
       schema.employees,
       eq(schema.employees.id, schema.monthlyPayrolls.employeeId)
     )
-    .innerJoin(schema.users, eq(schema.users.id, schema.employees.userId))
+    .leftJoin(schema.users, eq(schema.users.id, schema.employees.userId))
     .where(
       and(
         eq(schema.monthlyPayrolls.id, periodId),
@@ -297,6 +298,8 @@ export async function buildPayrollReport(
   if (!item) {
     throw new AppError('Payroll period not found', 404, 'PAYROLL_NOT_FOUND');
   }
+
+  const staffName = item.userFullName || item.employeeName || 'Employee';
 
   return {
     title: 'Payroll Report',
@@ -312,7 +315,7 @@ export async function buildPayrollReport(
     ],
     rows: [[
       item.staffCode ?? '',
-      item.staffName ?? '',
+      staffName,
       item.earnedAmount,
       item.paidAmount,
       item.dueAmount,

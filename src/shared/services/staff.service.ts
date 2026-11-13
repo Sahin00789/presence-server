@@ -208,7 +208,7 @@ export async function listOrganizationStaff(
     }
   >
 > {
-  return fastify.db
+  const rows = await fastify.db
     .select({
       id: schema.employees.id,
       organizationId: schema.employees.organizationId,
@@ -225,13 +225,20 @@ export async function listOrganizationStaff(
       isActive: schema.employees.isActive,
       createdAt: schema.employees.createdAt,
       updatedAt: schema.employees.updatedAt,
-      email: schema.users.email,
-      fullName: schema.users.fullName,
+      userEmail: schema.users.email,
+      userFullName: schema.users.fullName,
       userIsActive: schema.users.isActive,
     })
     .from(schema.employees)
-    .innerJoin(schema.users, eq(schema.employees.userId, schema.users.id))
+    .leftJoin(schema.users, eq(schema.employees.userId, schema.users.id))
     .where(eq(schema.employees.organizationId, organizationId));
+
+  return rows.map((r) => ({
+    ...r,
+    email: r.userEmail ?? '',
+    fullName: r.userFullName || r.name,
+    userIsActive: r.userIsActive ?? r.isActive,
+  }));
 }
 
 /**

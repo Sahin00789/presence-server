@@ -274,7 +274,7 @@ export async function listEmployees(
       isActive: schema.employees.isActive,
     })
     .from(schema.employees)
-    .innerJoin(schema.users, eq(schema.employees.userId, schema.users.id))
+    .leftJoin(schema.users, eq(schema.employees.userId, schema.users.id))
     .leftJoin(schema.premises, eq(schema.premises.id, schema.employees.premisesId))
     .where(and(...conditions))
     .orderBy(desc(schema.employees.createdAt));
@@ -336,7 +336,7 @@ export async function listEmployees(
       organizationId,
       organizationName: orgName,
       userId: row.userId ?? '',
-      email: row.email,
+      email: row.email ?? '',
       fullName: row.name,
       staffCode: row.employeeCode,
       department: row.department,
