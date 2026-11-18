@@ -3,6 +3,8 @@ import { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 import {
   dashboardSummarySchema,
+  monthlyReportSummaryQuerySchema,
+  monthlyReportSummaryResponseSchema,
   payrollReportQuerySchema,
   reportRangeQuerySchema,
 } from './schemas.js';
@@ -10,6 +12,7 @@ import {
   buildAttendanceReport,
   buildPayrollReport,
   getDashboardSummary,
+  getMonthlyReportSummary,
   renderReport,
 } from './service.js';
 
@@ -34,6 +37,35 @@ export async function reportRoutes(fastify: FastifyInstance) {
         request.user.organizationId
       );
       return reply.send(result);
+    }
+  );
+
+  server.get(
+    '/api/v1/reports/summary/monthly',
+    {
+      preHandler: [fastify.authenticate, fastify.authorizeRoles('OWNER')],
+      schema: {
+        description:
+          'Organization-level monthly executive report summary including total attendance counts, late stats, worked hours, and financial totals.',
+        tags: ['Reports'],
+        querystring: monthlyReportSummaryQuerySchema,
+        response: { 200: monthlyReportSummaryResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const { month, year, premisesId } = request.query as {
+        month: number;
+        year: number;
+        premisesId?: string;
+      };
+      const summary = await getMonthlyReportSummary(
+        fastify,
+        request.user.organizationId,
+        month,
+        year,
+        premisesId
+      );
+      return reply.send(summary);
     }
   );
 
@@ -75,7 +107,7 @@ export async function reportRoutes(fastify: FastifyInstance) {
       schema: {
         description: 'Payroll report for one period (JSON, CSV or PDF)',
         tags: ['Reports'],
-        params: z.object({ periodId: z.string().uuid() }),
+        params: z.object({ periodId: z.string() }),
         querystring: payrollReportQuerySchema,
       },
     },

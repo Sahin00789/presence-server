@@ -1237,6 +1237,10 @@ export async function listAttendanceRecords(
       }
     }
 
+    const workedMinutes = (r.event.clockInAt && r.event.clockOutAt)
+      ? Math.max(0, Math.floor((new Date(r.event.clockOutAt).getTime() - new Date(r.event.clockInAt).getTime()) / 60_000))
+      : 0;
+
     return {
       id: r.event.id,
       organizationId: r.event.organizationId,
@@ -1259,6 +1263,7 @@ export async function listAttendanceRecords(
       faceVerified: Boolean(r.event.faceVerified),
       geofenceVerified: Boolean(r.event.geofenceVerified),
       lateMinutes,
+      workedMinutes,
       createdAt: r.event.createdAt ? new Date(r.event.createdAt).toISOString() : null,
     };
   });

@@ -84,11 +84,6 @@ export async function postLeaveEarnings(
         )
         .limit(1);
 
-      const scheduledMinutes = Math.max(
-        0,
-        isOvernight ? 24 * 60 - shiftStartMins + shiftEndMins : shiftEndMins - shiftStartMins
-      );
-
       if (approvedLeave) {
         let attendanceId = existingAttendance?.id;
 
@@ -143,47 +138,23 @@ export async function postLeaveEarnings(
             sourceReference: `leave:${approvedLeave.id}`,
           } as any);
           approvedLeavesProcessed += 1;
-        }
-      } else {
-        if (!existingAttendance) {
-          const [inserted] = await fastify.db
-            .insert(schema.employeeAttendance)
-            .values({
-              organizationId: assignment.organizationId,
-              premisesId: assignment.premisesId,
-              employeeId: assignment.employeeId,
-              shiftAssignmentId: assignment.assignmentId,
-              workDate: date,
-              status: 'ABSENT',
-              remarks: 'Auto-marked absent: Shift ended with no clock-in',
-            })
-            .returning();
 
-          const absentPay = Number(assignment.absentPay ?? 0);
-          if (absentPay !== 0) {
-            await fastify.db.insert(schema.employeeEarningLedger).values({
+          if (typeof (fastify as any).publishDomainEvent === 'function') {
+            await (fastify as any).publishDomainEvent({
+              type: 'attendance_update',
               organizationId: assignment.organizationId,
               premisesId: assignment.premisesId,
-              employeeId: assignment.employeeId,
-              earningDate: date,
-              type: 'SHIFT',
-              amount: String(absentPay),
-              shiftAssignmentId: assignment.assignmentId,
-              attendanceId: inserted.id,
-              sourceReference: `absent:${inserted.id}`,
-            } as any);
+              userIds: [],
+              payload: {
+                attendanceEventId: attendanceId,
+                staffProfileId: assignment.employeeId,
+                status: 'LEAVE',
+                action: 'AUTO_LEAVE_EARNING',
+                earningDate: date,
+                amount: leavePay,
+              },
+            });
           }
-          autoAbsentMarked += 1;
-        } else if (existingAttendance.status !== 'ABSENT') {
-          await fastify.db
-            .update(schema.employeeAttendance)
-            .set({
-              status: 'ABSENT',
-              remarks: 'Auto-marked absent: Shift ended with no clock-in',
-              updatedAt: new Date(),
-            })
-            .where(eq(schema.employeeAttendance.id, existingAttendance.id));
-          autoAbsentMarked += 1;
         }
       }
     }
@@ -192,6 +163,32 @@ export async function postLeaveEarnings(
   return { approvedLeavesProcessed, autoAbsentMarked };
 }
 
-export function startLeaveEarningsJob(_fastify: FastifyInstance): void {
-  // Background cron job disabled: employee self-service claim flow replaces automated cronjob.
+export function startLeaveEarningsJob(fastify: FastifyInstance): void {
+  let timer: NodeJS.Timeout | null = null;
+  let running = false;
+
+  const run = async () => {
+    if (running) return;
+    running = true;
+    try {
+      await postLeaveEarnings(fastify);
+    } catch (error) {
+      fastify.log.error({ err: error }, 'Leave earnings job failed');
+    } finally {
+      running = false;
+    }
+  };
+
+  fastify.addHook('onListen', async () => {
+    setTimeout(run, 4000);
+    timer = setInterval(run, 30_000);
+    timer.unref?.();
+  });
+
+  fastify.addHook('onClose', async () => {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  });
 }

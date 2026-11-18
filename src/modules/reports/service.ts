@@ -224,6 +224,123 @@ export async function getDashboardSummary(
   };
 }
 
+export async function getMonthlyReportSummary(
+  fastify: FastifyInstance,
+  organizationId: string,
+  month: number,
+  year: number,
+  premisesId?: string
+) {
+  const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+  const lastDay = new Date(year, month, 0).getDate();
+  const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+
+  const staff = await listOrganizationStaff(fastify, organizationId);
+
+  const attendanceConditions = [
+    eq(schema.employees.organizationId, organizationId),
+    gte(schema.employeeAttendance.workDate, startDate),
+    lte(schema.employeeAttendance.workDate, endDate),
+  ];
+  if (premisesId) {
+    attendanceConditions.push(eq(schema.employees.premisesId, premisesId));
+  }
+
+  const attendanceEvents = await fastify.db
+    .select({
+      id: schema.employeeAttendance.id,
+      employeeId: schema.employeeAttendance.employeeId,
+      status: schema.employeeAttendance.status,
+      workDate: schema.employeeAttendance.workDate,
+      clockInAt: schema.employeeAttendance.clockInAt,
+      clockOutAt: schema.employeeAttendance.clockOutAt,
+      assignedStartTime: schema.employeeAttendance.assignedShiftStartTime,
+    })
+    .from(schema.employeeAttendance)
+    .innerJoin(schema.employees, eq(schema.employees.id, schema.employeeAttendance.employeeId))
+    .where(and(...attendanceConditions));
+
+  let presentCount = 0;
+  let absentCount = 0;
+  let halfDayCount = 0;
+  let leaveCount = 0;
+  let lateCount = 0;
+  let totalWorkedMinutes = 0;
+  let totalLateMinutes = 0;
+
+  for (const ev of attendanceEvents) {
+    switch (ev.status) {
+      case 'PRESENT':
+        presentCount++;
+        break;
+      case 'ABSENT':
+        absentCount++;
+        break;
+      case 'HALF_DAY':
+        halfDayCount++;
+        break;
+      case 'LEAVE':
+        leaveCount++;
+        break;
+    }
+
+    if (ev.clockInAt && ev.clockOutAt) {
+      const worked = Math.max(0, Math.floor((new Date(ev.clockOutAt).getTime() - new Date(ev.clockInAt).getTime()) / 60_000));
+      totalWorkedMinutes += worked;
+    }
+
+    if (ev.clockInAt && ev.assignedStartTime) {
+      try {
+        const clockInDate = new Date(ev.clockInAt);
+        const [sh, sm] = ev.assignedStartTime.split(':').map(Number);
+        const shiftStartDate = new Date(clockInDate);
+        shiftStartDate.setHours(sh, sm, 0, 0);
+        const diffMs = clockInDate.getTime() - shiftStartDate.getTime();
+        if (diffMs > 0) {
+          const lateMins = Math.floor(diffMs / 60_000);
+          if (lateMins > 0) {
+            lateCount++;
+            totalLateMinutes += lateMins;
+          }
+        }
+      } catch (_e) {
+        // ignore
+      }
+    }
+  }
+
+  const totalRecords = attendanceEvents.length;
+  const attendanceRate = totalRecords > 0
+    ? Math.round(((presentCount + leaveCount + halfDayCount) / totalRecords) * 100)
+    : 100;
+
+  const payrollSummaries = await listMonthlyPayrollSummaries(fastify, organizationId, month, year, premisesId);
+  const totalEarnedInr = payrollSummaries.reduce((sum, p) => sum + Number(p.earnedAmount || 0), 0);
+  const totalPaidInr = payrollSummaries.reduce((sum, p) => sum + Number(p.paidAmount || 0), 0);
+  const totalDueInr = payrollSummaries.reduce((sum, p) => sum + Number(p.dueAmount || 0), 0);
+
+  return {
+    month,
+    year,
+    premisesId: premisesId ?? null,
+    totalStaff: staff.length,
+    totalRecords,
+    presentCount,
+    absentCount,
+    halfDayCount,
+    leaveCount,
+    lateCount,
+    totalWorkedMinutes,
+    totalLateMinutes,
+    attendanceRate,
+    financials: {
+      totalEarnedInr: Math.round(totalEarnedInr),
+      totalPaidInr: Math.round(totalPaidInr),
+      totalDueInr: Math.round(totalDueInr),
+    },
+  };
+}
+
 export async function buildAttendanceReport(
   fastify: FastifyInstance,
   user: { userId: string; role: 'OWNER' | 'EMPLOYEE' },
@@ -232,7 +349,7 @@ export async function buildAttendanceReport(
 ): Promise<ReportTable> {
   const records = await listAttendanceRecords(fastify, user, organizationId, {
     ...query,
-    limit: 200,
+    limit: 500,
     offset: 0,
   });
 
@@ -243,11 +360,12 @@ export async function buildAttendanceReport(
       'Work Date',
       'Staff Code',
       'Staff Name',
+      'Shift Window',
       'Clock In',
       'Clock Out',
       'Status',
       'Worked Minutes',
-      'Overtime Minutes',
+      'Late Minutes',
       'Face Verified',
       'Geofence Verified',
     ],
@@ -255,11 +373,12 @@ export async function buildAttendanceReport(
       record.workDate ?? '',
       record.staffCode ?? '',
       record.staffName ?? '',
+      `${record.assignedStartTime ?? '—'} - ${record.assignedEndTime ?? '—'}`,
       record.clockIn ? new Date(record.clockIn).toISOString() : '',
       record.clockOut ? new Date(record.clockOut).toISOString() : '',
       record.status,
-      0,
-      0,
+      (record as any).workedMinutes ?? 0,
+      record.lateMinutes ?? 0,
       record.faceVerified ? 'YES' : 'NO',
       record.geofenceVerified ? 'YES' : 'NO',
     ]),
@@ -271,8 +390,49 @@ export async function buildPayrollReport(
   organizationId: string,
   periodId: string
 ): Promise<ReportTable> {
-  const [item] = await fastify.db
+  let targetMonth: number | null = null;
+  let targetYear: number | null = null;
+
+  const yearMonthMatch = periodId.match(/^(\d{4})-(\d{1,2})$/) || periodId.match(/^(\d{1,2})-(\d{4})$/);
+  if (yearMonthMatch) {
+    if (yearMonthMatch[1].length === 4) {
+      targetYear = Number(yearMonthMatch[1]);
+      targetMonth = Number(yearMonthMatch[2]);
+    } else {
+      targetMonth = Number(yearMonthMatch[1]);
+      targetYear = Number(yearMonthMatch[2]);
+    }
+  } else {
+    const [period] = await fastify.db
+      .select({ month: schema.monthlyPayrolls.month, year: schema.monthlyPayrolls.year })
+      .from(schema.monthlyPayrolls)
+      .where(
+        and(
+          eq(schema.monthlyPayrolls.id, periodId),
+          eq(schema.monthlyPayrolls.organizationId, organizationId)
+        )
+      )
+      .limit(1);
+
+    if (period) {
+      targetMonth = period.month;
+      targetYear = period.year;
+    }
+  }
+
+  const conditions = [eq(schema.monthlyPayrolls.organizationId, organizationId)];
+  if (targetMonth !== null && targetYear !== null) {
+    conditions.push(eq(schema.monthlyPayrolls.month, targetMonth));
+    conditions.push(eq(schema.monthlyPayrolls.year, targetYear));
+  } else {
+    conditions.push(eq(schema.monthlyPayrolls.id, periodId));
+  }
+
+  const items = await fastify.db
     .select({
+      id: schema.monthlyPayrolls.id,
+      month: schema.monthlyPayrolls.month,
+      year: schema.monthlyPayrolls.year,
       staffCode: schema.employees.employeeCode,
       employeeName: schema.employees.name,
       userFullName: schema.users.fullName,
@@ -287,40 +447,36 @@ export async function buildPayrollReport(
       eq(schema.employees.id, schema.monthlyPayrolls.employeeId)
     )
     .leftJoin(schema.users, eq(schema.users.id, schema.employees.userId))
-    .where(
-      and(
-        eq(schema.monthlyPayrolls.id, periodId),
-        eq(schema.monthlyPayrolls.organizationId, organizationId)
-      )
-    )
-    .limit(1);
+    .where(and(...conditions))
+    .orderBy(schema.employees.employeeCode);
 
-  if (!item) {
-    throw new AppError('Payroll period not found', 404, 'PAYROLL_NOT_FOUND');
+  if (items.length === 0) {
+    throw new AppError('Payroll records not found for period', 404, 'PAYROLL_NOT_FOUND');
   }
 
-  const staffName = item.userFullName || item.employeeName || 'Employee';
+  const monthLabel = targetMonth && targetYear ? `${String(targetMonth).padStart(2, '0')}/${targetYear}` : periodId;
 
   return {
     title: 'Payroll Report',
-    subtitle: `Payroll period ${periodId}`,
+    subtitle: `Payroll period ${monthLabel}`,
     columns: [
       'Staff Code',
       'Staff Name',
       'Earned',
       'Paid',
       'Due',
-      'Due (INR)',
       'Status',
     ],
-    rows: [[
-      item.staffCode ?? '',
-      staffName,
-      item.earnedAmount,
-      item.paidAmount,
-      item.dueAmount,
-      formatMoney(item.dueAmount),
-      item.status,
-    ]],
+    rows: items.map((item) => {
+      const staffName = item.userFullName || item.employeeName || 'Employee';
+      return [
+        item.staffCode ?? '',
+        staffName,
+        formatMoney(item.earnedAmount),
+        formatMoney(item.paidAmount),
+        formatMoney(item.dueAmount),
+        item.status,
+      ];
+    }),
   };
 }

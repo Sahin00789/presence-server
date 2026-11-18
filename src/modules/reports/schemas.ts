@@ -13,6 +13,33 @@ export const payrollReportQuerySchema = z.object({
   format: reportFormatSchema,
 });
 
+export const monthlyReportSummaryQuerySchema = z.object({
+  month: z.coerce.number().int().min(1).max(12),
+  year: z.coerce.number().int().min(2000).max(2100),
+  premisesId: z.string().uuid().optional(),
+});
+
+export const monthlyReportSummaryResponseSchema = z.object({
+  month: z.number().int(),
+  year: z.number().int(),
+  premisesId: z.string().nullable(),
+  totalStaff: z.number().int(),
+  totalRecords: z.number().int(),
+  presentCount: z.number().int(),
+  absentCount: z.number().int(),
+  halfDayCount: z.number().int(),
+  leaveCount: z.number().int(),
+  lateCount: z.number().int(),
+  totalWorkedMinutes: z.number().int(),
+  totalLateMinutes: z.number().int(),
+  attendanceRate: z.number().int(),
+  financials: z.object({
+    totalEarnedInr: z.number().int(),
+    totalPaidInr: z.number().int(),
+    totalDueInr: z.number().int(),
+  }),
+});
+
 export const dashboardSummarySchema = z.object({
   role: z.enum(['OWNER', 'EMPLOYEE']),
   generatedAt: z.string(),
