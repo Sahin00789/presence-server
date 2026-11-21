@@ -32,18 +32,26 @@ export class GoogleAuthService {
     this.oauth2Client = new OAuth2Client();
   }
 
-  /** Client ID whose ID tokens are accepted (web client ID). */
-  allowedAudiences(): string[] {
-    return [env.GOOGLE_WEB_CLIENT_ID];
-  }
-
+  /**
+   * Purpose: Checks if the provided audience string matches the configured Google Web Client ID.
+   * How it works: Compares the `audience` parameter against `env.GOOGLE_WEB_CLIENT_ID` and returns `true` if valid.
+   *
+   * @param audience Optional audience string extracted from Google JWT payload.
+   * @returns `true` if the audience matches `GOOGLE_WEB_CLIENT_ID`; otherwise `false`.
+   */
   isAllowedAudience(audience?: string): boolean {
     return Boolean(audience) && audience === env.GOOGLE_WEB_CLIENT_ID;
   }
 
   /**
-   * Verifies a Google ID token using google-auth-library.
-   * This is the path used by Android Credential Manager / Google ID Token flow.
+   * Purpose: Verifies a Google ID token using `google-auth-library`.
+   * How it works: Validates the JWT cryptographically against Google's public keys, enforces issuer check (`accounts.google.com`),
+   * confirms `email_verified: true`, checks audience matching `GOOGLE_WEB_CLIENT_ID`, and normalizes identity to `GoogleUserProfile`.
+   *
+   * @param idToken Raw Google ID token string passed from Android Credential Manager or Google Sign-In SDK.
+   * @param logger Optional Fastify logger for structured error and warning logs.
+   * @returns Normalized `GoogleUserProfile` containing `googleSub`, `email`, `fullName`, and `picture`.
+   * @throws AppError 401 if identity verification or claim checks fail.
    */
   async verifyIdToken(
     idToken: string,
@@ -94,8 +102,13 @@ export class GoogleAuthService {
   }
 
   /**
-   * Exchanges an authorization code (browser redirect flow or Android
-   * `requestServerAuthCode`) for a verified Google profile.
+   * Purpose: Exchanges a Google authorization code for tokens and extracts a verified user profile.
+   * How it works: Issues an HTTP POST request to Google's OAuth2 token endpoint (`oauth2.googleapis.com/token`)
+   * using client credentials and grant type `authorization_code`. Extracts the returned `id_token` and calls `verifyIdToken()`.
+   *
+   * @param options Object containing `code`, optional `redirectUri`, `codeVerifier`, and `logger`.
+   * @returns Verified `GoogleUserProfile`.
+   * @throws AppError 400 if client secret is missing or code is empty; 401 if Google exchange or ID token validation fails.
    */
   async exchangeCode({
     code,

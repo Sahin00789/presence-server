@@ -13,6 +13,15 @@ import {
 
 
 
+/**
+ * Purpose: Retrieves organization details by ID.
+ * How it works: Performs SELECT on `organizations` table matching `organizationId`.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @returns Organization object.
+ * @throws AppError 404 if organization not found.
+ */
 export async function getOrganization(
   fastify: FastifyInstance,
   organizationId: string
@@ -37,6 +46,14 @@ export async function getOrganization(
   };
 }
 
+/**
+ * Purpose: Computes summary counts (member count, staff count) for an organization.
+ * How it works: Queries total active employees from `employees` table and combines with owner account to compute total members.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @returns OrganizationSummary object containing organization details and member counts.
+ */
 export async function getOrganizationSummary(
   fastify: FastifyInstance,
   organizationId: string
@@ -66,7 +83,14 @@ export async function getOrganizationSummary(
 }
 
 /**
- * Creates an additional organization for an Owner.
+ * Purpose: Creates an additional organization workspace for an Owner along with initial primary premises.
+ * How it works: Inserts new `organizations` row, inserts initial `premises` row if specified inside a transaction,
+ * and sends welcome email asynchronously.
+ *
+ * @param fastify Fastify instance.
+ * @param ownerUserId User ID of the Owner.
+ * @param input CreateOrganizationInput object (`name`, `timezone`, `currency`, optional premises fields).
+ * @returns Created Organization object.
  */
 export async function createOrganization(
   fastify: FastifyInstance,
@@ -133,6 +157,17 @@ export async function createOrganization(
   };
 }
 
+/**
+ * Purpose: Updates organization profile fields (name, timezone, currency, logo URL).
+ * How it works: Executes UPDATE query on `organizations` table matching `organizationId`.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param actorUserId User ID performing update (Owner).
+ * @param input UpdateOrganizationInput object.
+ * @returns Updated Organization object.
+ * @throws AppError 404 if organization not found.
+ */
 export async function updateOrganization(
   fastify: FastifyInstance,
   organizationId: string,
@@ -167,6 +202,15 @@ export async function updateOrganization(
   };
 }
 
+/**
+ * Purpose: Lists all members (Owner + Employees) of an organization with their user profiles and roles.
+ * How it works: Queries the organization owner joined with `users` and all active employees joined with `users` and `premises`.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @returns Array of OrganizationMember objects.
+ * @throws AppError 404 if organization not found.
+ */
 export async function listOrganizationMembers(
   fastify: FastifyInstance,
   organizationId: string
@@ -244,6 +288,17 @@ export async function listOrganizationMembers(
   return members;
 }
 
+/**
+ * Purpose: Deactivates an organization member.
+ * How it works: Prevents self-deactivation and owner deactivation. Sets `isActive = false` in `employees` table and deletes face templates in a transaction.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param actorUserId User ID requesting deactivation (Owner).
+ * @param targetUserId User ID of member to deactivate.
+ * @returns Object `{ deactivated: true }`.
+ * @throws AppError 400 if self-deactivation; 403 if owner deactivation attempted; 404 if member not found.
+ */
 export async function deactivateMember(
   fastify: FastifyInstance,
   organizationId: string,
@@ -305,6 +360,17 @@ export async function deactivateMember(
   return { deactivated: true };
 }
 
+/**
+ * Purpose: Uploads and sets an organization's logo image.
+ * How it works: Updates `logoUrl` column in `organizations` table for `organizationId`.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param _actorUserId User ID performing upload.
+ * @param input Input object containing `logoBase64`, `logoUrl`, or `logo`.
+ * @returns Object `{ organizationId, logoUrl }`.
+ * @throws AppError 400 if logo payload missing; 404 if organization not found.
+ */
 export async function uploadOrganizationLogo(
   fastify: FastifyInstance,
   organizationId: string,
@@ -331,6 +397,17 @@ export async function uploadOrganizationLogo(
   return { organizationId: updated.id, logoUrl: updated.logoUrl || '' };
 }
 
+/**
+ * Purpose: Uploads and updates the Owner's avatar photo.
+ * How it works: Updates `avatarUrl` column in `users` table for `ownerUserId`.
+ *
+ * @param fastify Fastify instance.
+ * @param _organizationId Target organization UUID.
+ * @param ownerUserId Owner user UUID.
+ * @param input Input object containing photo payload (`photoBase64`, `photoUrl`, `avatarBase64`, `avatarUrl`).
+ * @returns Object `{ ownerUserId, avatarUrl }`.
+ * @throws AppError 400 if photo payload missing.
+ */
 export async function uploadOwnerPhoto(
   fastify: FastifyInstance,
   _organizationId: string,

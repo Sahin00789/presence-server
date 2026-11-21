@@ -6,9 +6,13 @@ import { AppError } from '../errors/app-error.js';
 export type StaffProfileRecord = typeof schema.employees.$inferSelect;
 
 /**
- * Resolves the employee record that belongs to the authenticated user inside
- * the given organization. Every staff-scoped query funnels through here so the
- * `organization_id` guard is applied in exactly one place.
+ * Purpose: Resolves the employee record for a given user ID within a specific organization.
+ * How it works: Performs a SELECT on `employees` table matching `userId` and `organizationId`. Returns `null` if not found.
+ *
+ * @param fastify Fastify app instance containing Drizzle ORM client.
+ * @param userId UUID of the user account.
+ * @param organizationId UUID of the target organization.
+ * @returns StaffProfileRecord or null if user has no employee profile in this organization.
  */
 export async function findStaffProfile(
   fastify: FastifyInstance,
@@ -30,7 +34,15 @@ export async function findStaffProfile(
 }
 
 /**
- * Same as {@link findStaffProfile} but creates an employee record on demand.
+ * Purpose: Ensures an employee profile exists for a user, creating one on-demand if missing.
+ * How it works: Checks `findStaffProfile`. If missing, confirms user exists and is not the organization owner (owners cannot be employees).
+ * Inserts a new row into `employees` with an auto-generated staff code and returns the created record.
+ *
+ * @param fastify Fastify instance.
+ * @param userId UUID of the user.
+ * @param organizationId UUID of the organization.
+ * @returns StaffProfileRecord instance.
+ * @throws AppError 404 if user not found; 400 if user is organization owner.
  */
 export async function ensureStaffProfile(
   fastify: FastifyInstance,
@@ -82,7 +94,15 @@ export async function ensureStaffProfile(
 }
 
 /**
- * Resolves an employee by either employeeId or userId.
+ * Purpose: Flexible staff profile resolver accepting either an `employeeId` or a `userId`.
+ * How it works: Attempts direct lookup by employee primary key `id`. If missing, attempts lookup by `userId`.
+ * If missing, checks if `employeeOrUserId` is a valid `users.id` and creates a profile via `ensureStaffProfile`.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId UUID of the organization.
+ * @param employeeOrUserId UUID representing either an employee record ID or user ID.
+ * @returns Resolved StaffProfileRecord.
+ * @throws AppError 404 if no employee or user match is found.
  */
 export async function resolveStaffProfile(
   fastify: FastifyInstance,
@@ -122,7 +142,15 @@ export async function resolveStaffProfile(
   throw new AppError('Staff profile not found', 404, 'STAFF_PROFILE_NOT_FOUND');
 }
 
-/** Generates a unique human-readable employee code such as `STF-0007`. */
+/**
+ * Purpose: Generates a collision-resistant human-readable staff code (e.g., `STF-0007-123`).
+ * How it works: Counts existing employees in organization, formats candidate code, checks DB for uniqueness up to 25 attempts,
+ * falling back to a base-36 timestamp suffix if all candidates collide.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @returns Unique staff code string.
+ */
 export async function generateStaffCode(
   fastify: FastifyInstance,
   organizationId: string
@@ -155,8 +183,16 @@ export async function generateStaffCode(
 }
 
 /**
- * Resolves every user id that should receive operational notifications for a
- * given organization (owner + the employee themselves).
+ * Purpose: Identifies all user IDs that should receive operational notifications for an action.
+ * How it works: Queries the organization owner user ID (if `includeOwners` is true) and the target employee user ID (if `employeeId` given).
+ * Returns a deduplicated array of user ID strings.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param employeeId Optional staff profile UUID.
+ * @param includeOwners Whether to include organization owner user ID (default true).
+ * @param premisesId Optional premises UUID.
+ * @returns Array of target user ID strings.
  */
 export async function resolveNotificationTargets(
   fastify: FastifyInstance,
@@ -194,7 +230,12 @@ export async function resolveNotificationTargets(
 }
 
 /**
- * Lists every employee of an organization joined with its user.
+ * Purpose: Lists all employee records for an organization joined with user profile info.
+ * How it works: Performs a LEFT JOIN between `employees` and `users` on `userId`, returning array of enriched staff records.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Organization UUID.
+ * @returns Array of employee records enriched with `email`, `fullName`, and `userIsActive`.
  */
 export async function listOrganizationStaff(
   fastify: FastifyInstance,
@@ -242,7 +283,12 @@ export async function listOrganizationStaff(
 }
 
 /**
- * Returns the user ids of all owners of an organization.
+ * Purpose: Retrieves user IDs of all owners of an organization.
+ * How it works: Queries `organizations.ownerUserId` for the specified `organizationId`.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @returns Array containing owner user ID strings.
  */
 export async function listOwnerUserIds(
   fastify: FastifyInstance,
@@ -257,36 +303,16 @@ export async function listOwnerUserIds(
 }
 
 /**
- * Returns the user ids of every active manager of an organization (legacy alias, returns empty array).
+ * Purpose: Legacy compatibility helper returning manager user IDs.
+ * How it works: In the simplified 2-role system (OWNER & EMPLOYEE), returns an empty array.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @returns Empty array of strings.
  */
 export async function listManagerUserIds(
   fastify: FastifyInstance,
   organizationId: string
 ): Promise<string[]> {
   return [];
-}
-
-/**
- * Returns the user ids of the given employee ids inside an organization.
- */
-export async function listUserIdsForProfiles(
-  fastify: FastifyInstance,
-  organizationId: string,
-  employeeIds: string[]
-): Promise<string[]> {
-  if (employeeIds.length === 0) {
-    return [];
-  }
-
-  const rows = await fastify.db
-    .select({ userId: schema.employees.userId })
-    .from(schema.employees)
-    .where(
-      and(
-        eq(schema.employees.organizationId, organizationId),
-        inArray(schema.employees.id, employeeIds)
-      )
-    );
-
-  return rows.map((row) => row.userId).filter((id): id is string => Boolean(id));
 }

@@ -64,7 +64,11 @@ export interface ShiftUpdatePayload {
 }
 
 /**
- * Publishes a domain event to all local subscribers, cache invalidators, and active WebSockets.
+ * Purpose: Publishes a domain event across the process-local event bus for real-time WebSocket broadcasting and system listeners.
+ * How it works: Attaches an ISO `emittedAt` timestamp envelope and emits the event over `domainEventBus` EventEmitter on `DOMAIN_EVENT_CHANNEL`.
+ *
+ * @param fastify Fastify instance.
+ * @param event DomainEvent object containing `type`, `organizationId`, optional `userIds`, `premisesId`, `targetRoles`, and `payload`.
  */
 export async function publishDomainEvent(
   fastify: FastifyInstance,

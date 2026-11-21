@@ -2,9 +2,10 @@ import { FastifyInstance } from 'fastify';
 import { and, eq, isNull, ne } from 'drizzle-orm';
 import * as schema from '../db/schema.js';
 import { accrueShiftEarnings } from '../modules/attendance/service.js';
-import { resolveTimezone } from '../modules/shifts/service.js';
+import { getAssignedDayNumbers, resolveTimezone } from '../modules/shifts/service.js';
 import {
   addDays,
+  dayOfWeek,
   resolveShiftWindow,
   toDateISOInTimeZone,
 } from '../shared/utils/datetime.js';
@@ -24,17 +25,23 @@ export async function processAutoPresentAndOvertimeCompletion(
         organizationId: schema.employeeShiftAssignments.organizationId,
         premisesId: schema.employeeShiftAssignments.premisesId,
         employeeId: schema.employeeShiftAssignments.employeeId,
+        userId: schema.employees.userId,
         shiftId: schema.employeeShiftAssignments.shiftId,
         presentPay: schema.employeeShiftAssignments.presentPay,
         leavePay: schema.employeeShiftAssignments.leavePay,
         startTime: schema.shifts.startTime,
         endTime: schema.shifts.endTime,
+        dayName: schema.shifts.dayName,
         createdAt: schema.employeeShiftAssignments.createdAt,
       })
       .from(schema.employeeShiftAssignments)
       .innerJoin(
         schema.shifts,
         eq(schema.employeeShiftAssignments.shiftId, schema.shifts.id)
+      )
+      .innerJoin(
+        schema.employees,
+        eq(schema.employeeShiftAssignments.employeeId, schema.employees.id)
       )
       .where(
         and(
@@ -55,10 +62,19 @@ export async function processAutoPresentAndOvertimeCompletion(
     for (const assignment of activeAssignments) {
       const tz = await getOrgTz(assignment.organizationId);
       const todayISO = toDateISOInTimeZone(now, tz);
-      // Check yesterday and today to account for overnight shifts
-      const datesToCheck = [addDays(todayISO, -1), todayISO];
+      // Check last 7 days to account for multi-day server outages, restarts & overnight shifts
+      const datesToCheck: string[] = [];
+      for (let i = 7; i >= 0; i--) {
+        datesToCheck.push(addDays(todayISO, -i));
+      }
 
       for (const date of datesToCheck) {
+        const dow = dayOfWeek(date);
+        const assignedDays = getAssignedDayNumbers(assignment.dayName);
+        if (!assignedDays.includes(dow)) {
+          continue;
+        }
+
         const window = resolveShiftWindow(
           date,
           assignment.startTime,
@@ -151,7 +167,7 @@ export async function processAutoPresentAndOvertimeCompletion(
                 type: 'attendance_update',
                 organizationId: assignment.organizationId,
                 premisesId: assignment.premisesId,
-                userIds: [],
+                userIds: assignment.userId ? [assignment.userId] : [],
                 payload: {
                   attendanceEventId: attendanceId,
                   staffProfileId: assignment.employeeId,
@@ -192,7 +208,7 @@ export async function processAutoPresentAndOvertimeCompletion(
                   type: 'attendance_update',
                   organizationId: assignment.organizationId,
                   premisesId: assignment.premisesId,
-                  userIds: [],
+                  userIds: assignment.userId ? [assignment.userId] : [],
                   payload: {
                     attendanceEventId: updated.id,
                     staffProfileId: assignment.employeeId,
@@ -234,7 +250,7 @@ export async function processAutoPresentAndOvertimeCompletion(
                 type: 'attendance_update',
                 organizationId: assignment.organizationId,
                 premisesId: assignment.premisesId,
-                userIds: [],
+                userIds: assignment.userId ? [assignment.userId] : [],
                 payload: {
                   attendanceEventId: inserted.id,
                   staffProfileId: assignment.employeeId,

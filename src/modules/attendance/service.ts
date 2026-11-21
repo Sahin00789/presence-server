@@ -40,7 +40,10 @@ type AttendanceRow = typeof schema.employeeAttendance.$inferSelect;
 type AttendanceStatus = (typeof schema.attendanceStatusEnum.enumValues)[number];
 type LocationResult = (typeof schema.locationCheckResultEnum.enumValues)[number];
 
-/** Maps an `employee_attendance` row to the camelCase shape returned to clients. */
+/**
+ * Purpose: Maps a database `employeeAttendance` row to a standardized public API DTO format.
+ * How it works: Transforms database fields into camelCase properties including timestamps, status, face/geofence verification flags, and overtime ID.
+ */
 export function toPublicAttendanceEvent(event: AttendanceRow) {
   return {
     id: event.id,
@@ -119,8 +122,8 @@ interface ResolvedShift {
 }
 
 /**
- * Minutes from shift start until the configured half-day threshold. The
- * threshold is a wall-clock time, so overnight shifts wrap past midnight.
+ * Purpose: Calculates duration in minutes from shift start until the configured half-day threshold wall-clock time.
+ * How it works: Parses start and threshold times into minute offsets, handling overnight wraparound.
  */
 export function halfDayThresholdMinutes(
   startTime: string,
@@ -139,9 +142,8 @@ export interface ClockOutResult {
 }
 
 /**
- * Applies the documented clock-out rules. Overtime is always PRESENT; a shift
- * becomes HALF_DAY when the worked duration is below the shift's half-day
- * threshold, otherwise LATE is preserved and everything else becomes PRESENT.
+ * Purpose: Determines clock-out status and overtime/early-departure metrics.
+ * How it works: Overtime sessions always yield PRESENT status. Shifts worked for less than half-day threshold yield HALF_DAY, otherwise PRESENT.
  */
 export function resolveClockOutResult(input: {
   attendanceType: 'SHIFT' | 'OVERTIME';
@@ -177,10 +179,16 @@ export function resolveClockOutResult(input: {
   };
 }
 
+/**
+ * Purpose: Checks if an attendance status indicates pending manual review (`SCHEDULED`).
+ */
 export function isPendingReview(status: string): boolean {
   return status === 'SCHEDULED';
 }
 
+/**
+ * Purpose: Resolves final shift attendance status considering worked duration and manual corrections.
+ */
 export function resolveFinalShiftStatus(input: {
   workedMinutes: number;
   halfDayThresholdMinutes: number;
@@ -192,11 +200,17 @@ export function resolveFinalShiftStatus(input: {
   return input.currentStatus;
 }
 
+/**
+ * Purpose: Determines whether a shift should be finalized after its scheduled end time plus 60-second grace window.
+ */
 export function shouldFinalizeAt(shiftEndAt: Date, now: Date = new Date()): boolean {
   const GRACE_PERIOD_MS = 60 * 1000;
   return now.getTime() >= shiftEndAt.getTime() + GRACE_PERIOD_MS;
 }
 
+/**
+ * Purpose: Checks if a periodic location check ping is overdue (greater than 15 minutes since last ping).
+ */
 export function isMissingPing(lastPingAt: Date | null, now: Date = new Date()): boolean {
   if (!lastPingAt) return true;
   const PING_INTERVAL_MS = 15 * 60 * 1000;
@@ -702,6 +716,17 @@ async function clockIn(
  * The row is created as SCHEDULED and an exception is raised for Manager or
  * Owner review. It is never auto-approved.
  */
+/**
+ * Purpose: Submits a manual clock-in request when face biometrics or GPS checks cannot be completed.
+ * How it works: Resolves employee and premises, inserts `employeeShiftAttendance` with `PRESENT` status and `faceVerified = false`,
+ * raises an exception alert, and notifies managers/owners for review.
+ *
+ * @param fastify Fastify instance.
+ * @param userId Authenticated user UUID.
+ * @param organizationId Target organization UUID.
+ * @param body Manual request body containing `latitude`, `longitude`, `accuracyMeters`, and `reason`.
+ * @returns Object containing public attendance event DTO, exception ID, and status `PENDING_REVIEW`.
+ */
 export async function requestManualClockIn(
   fastify: FastifyInstance,
   userId: string,
@@ -834,6 +859,18 @@ export async function requestManualClockIn(
   };
 }
 
+/**
+ * Purpose: Performs clock-out for an active shift or overtime session.
+ * How it works: Locates open attendance session where `clockOutAt` is null, sets server-authoritative `clockOutAt` timestamp,
+ * updates status to `PRESENT`, accrues earned salary in `staff_earning_ledger`, and broadcasts a WebSocket domain event.
+ *
+ * @param fastify Fastify instance.
+ * @param userId Authenticated user UUID.
+ * @param organizationId Target organization UUID.
+ * @param body Optional `attendanceEventId`.
+ * @returns Updated attendance record.
+ * @throws AppError 404 if active session not found; 409 if already clocked out or pending manual review.
+ */
 export async function clockOut(
   fastify: FastifyInstance,
   userId: string,
@@ -935,8 +972,13 @@ export async function clockOut(
 }
 
 /**
- * Accrues the shift earning into `staff_earning_ledger` exactly once. The
- * partial unique index `(attendance_id, type)` makes this idempotent.
+ * Purpose: Accrues shift earnings into `staff_earning_ledger` exactly once upon shift completion.
+ * How it works: Queries `employeeShiftAssignments` for present/half-day pay rates, inserts earning ledger entry with `type = 'SHIFT'` and deduplication source reference,
+ * and publishes `attendance_update` domain event.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param event AttendanceRow instance.
  */
 export async function accrueShiftEarnings(
   fastify: FastifyInstance,
@@ -999,6 +1041,16 @@ export async function accrueShiftEarnings(
   }
 }
 
+/**
+ * Purpose: Marks an overtime session as completed and accrues overtime earnings in the ledger.
+ * How it works: Updates `overtime.status = 'COMPLETED'`, records `workedMinutes` and `resolvedAt`, and inserts `OVERTIME` earning row into `staff_earning_ledger`.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param overtimeId Target overtime UUID.
+ * @param workedMinutes Total worked duration in minutes.
+ * @param attendanceId Attendance event UUID.
+ */
 export async function completeOvertime(
   fastify: FastifyInstance,
   organizationId: string,
@@ -1054,6 +1106,15 @@ export async function completeOvertime(
   }
 }
 
+/**
+ * Purpose: Lists attendance monitoring exceptions and location check failure alerts.
+ * How it works: Queries `employeeAttendance` for rows with 4+ consecutive location check failures, missing face verification, or missing geofence verification.
+ *
+ * @param fastify Fastify instance.
+ * @param user Authenticated user context (`userId`, `role`).
+ * @param organizationId Target organization UUID.
+ * @returns Array of exception alert objects (`THREE_GPS_FAILURES`, `FACE_MISMATCH`, `OUTSIDE_GEOFENCE`).
+ */
 export async function listExceptions(
   fastify: FastifyInstance,
   user: { userId: string; role: 'OWNER' | 'EMPLOYEE' },

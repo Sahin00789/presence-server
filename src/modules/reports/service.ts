@@ -26,7 +26,13 @@ export interface RenderedReport {
 }
 
 /**
- * Serializes a report table into JSON, CSV or PDF.
+ * Purpose: Serializes structured tabular report data into CSV, PDF, or JSON format.
+ * How it works: Formats columns and row arrays into UTF-8 CSV with Excel BOM, invoking PDF kit builder for PDF generation, or JSON stringification.
+ *
+ * @param table ReportTable containing title, subtitle, columns, and row arrays.
+ * @param format Target export format (`'json' | 'csv' | 'pdf'`).
+ * @param filenameBase Base string for output filename.
+ * @returns RenderedReport object containing `contentType`, `filename`, and `payload` (Buffer or string).
  */
 export function renderReport(
   table: ReportTable,
@@ -72,6 +78,16 @@ function formatMoney(amountInr: number | string): string {
   return `₹${num.toLocaleString('en-IN')}`;
 }
 
+/**
+ * Purpose: Retrieves high-level dashboard metrics tailored for either an Employee or Organization Owner.
+ * How it works: For Employees, retrieves today's attendance status, shift window, and month-to-date attendance totals.
+ * For Owners, aggregates organization staff count, present/absent/leave counts today, open exceptions, pending leave requests, and latest payroll summary.
+ *
+ * @param fastify Fastify instance.
+ * @param user User context (`userId`, `role`).
+ * @param organizationId Target organization UUID.
+ * @returns Dashboard summary object.
+ */
 export async function getDashboardSummary(
   fastify: FastifyInstance,
   user: { userId: string; role: 'OWNER' | 'EMPLOYEE' },
@@ -224,6 +240,18 @@ export async function getDashboardSummary(
   };
 }
 
+/**
+ * Purpose: Aggregates comprehensive monthly performance and financial statistics for an organization or premises.
+ * How it works: Queries `employeeAttendance` rows for month range to count present, absent, half-day, leave, and late instances,
+ * calculates total worked/late minutes and attendance rate %, and sums monthly payroll earned, paid, and due amounts.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param month Target month (1-12).
+ * @param year Target year (YYYY).
+ * @param premisesId Optional premises filter UUID.
+ * @returns Monthly summary object.
+ */
 export async function getMonthlyReportSummary(
   fastify: FastifyInstance,
   organizationId: string,
@@ -341,6 +369,16 @@ export async function getMonthlyReportSummary(
   };
 }
 
+/**
+ * Purpose: Constructs a tabular `ReportTable` structure for attendance records suitable for rendering to CSV, PDF, or JSON.
+ * How it works: Invokes `listAttendanceRecords()` and maps each attendance entry into columns (`Work Date`, `Staff Code`, `Staff Name`, `Shift Window`, `Clock In`, `Clock Out`, `Status`, `Worked Minutes`, `Late Minutes`, `Face Verified`, `Geofence Verified`).
+ *
+ * @param fastify Fastify instance.
+ * @param user User context (`userId`, `role`).
+ * @param organizationId Target organization UUID.
+ * @param query Filters (`from`, `to`, `staffProfileId`).
+ * @returns Promise resolving to `ReportTable`.
+ */
 export async function buildAttendanceReport(
   fastify: FastifyInstance,
   user: { userId: string; role: 'OWNER' | 'EMPLOYEE' },
@@ -385,6 +423,17 @@ export async function buildAttendanceReport(
   };
 }
 
+/**
+ * Purpose: Constructs a tabular `ReportTable` structure for payroll summaries for a given period.
+ * How it works: Parses month and year from `periodId`, queries `monthlyPayrolls` joined with `employees` and `users`,
+ * and maps rows into columns (`Staff Code`, `Staff Name`, `Earned`, `Paid`, `Due`, `Status`).
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param periodId Payroll period identifier (`YYYY-MM` or monthly payroll UUID).
+ * @returns Promise resolving to `ReportTable`.
+ * @throws AppError 404 if no payroll records found for period.
+ */
 export async function buildPayrollReport(
   fastify: FastifyInstance,
   organizationId: string,

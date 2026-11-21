@@ -4,6 +4,18 @@ import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
 import { postHolidayAndWeeklyOffEarnings } from '../../jobs/holidayWeeklyOffEarnings.js';
 
+/**
+ * Purpose: Retrieves a list of holiday calendar entries for an organization.
+ * How it works: Queries `holidayCalendars` filtered by `organizationId`, optional date range (`from`/`to`), and `premisesId`.
+ * Returns sorted array ordered by holiday date.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param from Optional start date filter (YYYY-MM-DD).
+ * @param to Optional end date filter (YYYY-MM-DD).
+ * @param premisesId Optional premises UUID filter.
+ * @returns Array of formatted holiday objects.
+ */
 export async function listHolidays(
   fastify: FastifyInstance,
   organizationId: string,
@@ -35,6 +47,18 @@ export async function listHolidays(
   }));
 }
 
+/**
+ * Purpose: Creates a new holiday calendar entry for a specific premises.
+ * How it works: Validates premises existence and checks for duplicate holidays on the same date/premises.
+ * Inserts new holiday row into `holidayCalendars` and triggers asynchronous holiday earnings calculation job.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param actorUserId User ID creating the holiday.
+ * @param input Input object containing `name`, `date`, `premisesId`, and optional `isPaid`.
+ * @returns Created holiday object.
+ * @throws AppError 400 if premises ID missing; 404 if premises not found; 409 if holiday exists on that date.
+ */
 export async function createHoliday(
   fastify: FastifyInstance,
   organizationId: string,
@@ -94,6 +118,19 @@ export async function createHoliday(
   };
 }
 
+/**
+ * Purpose: Updates an existing holiday calendar entry.
+ * How it works: Validates holiday existence, verifies target premises if changed, prevents conflicts on date/premises,
+ * and updates specified fields in `holidayCalendars`.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param actorUserId User ID performing update.
+ * @param holidayId Holiday entry UUID.
+ * @param input Partial fields to update (`name`, `date`, `isPaid`, `premisesId`).
+ * @returns Updated holiday object.
+ * @throws AppError 404 if holiday or premises not found; 409 if duplicate holiday exists.
+ */
 export async function updateHoliday(
   fastify: FastifyInstance,
   organizationId: string,
@@ -164,6 +201,16 @@ export async function updateHoliday(
   };
 }
 
+/**
+ * Purpose: Deletes a holiday calendar entry from an organization.
+ * How it works: Deletes row from `holidayCalendars` matching `holidayId` and `organizationId`.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param actorUserId User ID performing deletion.
+ * @param holidayId Holiday entry UUID to remove.
+ * @returns Object `{ deleted: true }`.
+ */
 export async function deleteHoliday(
   fastify: FastifyInstance,
   organizationId: string,

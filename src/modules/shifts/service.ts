@@ -642,6 +642,10 @@ export async function setWeeklyOffs(
   return { staffProfileId, daysOfWeek: uniqueDays };
 }
 
+/**
+ * Purpose: Internal helper listing holiday calendar entries for schedule construction.
+ * How it works: Performs SELECT on `holidayCalendars` filtered by `organizationId`, optional date range, and premises.
+ */
 export async function listHolidays(
   fastify: FastifyInstance,
   organizationId: string,
@@ -670,50 +674,19 @@ export async function listHolidays(
   }));
 }
 
-export async function createHoliday(
-  fastify: FastifyInstance,
-  organizationId: string,
-  actorUserId: string,
-  input: { name: string; date: string; premisesId: string; isPaid?: boolean }
-): Promise<any> {
-  const [created] = await fastify.db
-    .insert(schema.holidayCalendars)
-    .values({
-      organizationId,
-      premisesId: input.premisesId,
-      name: input.name,
-      date: input.date,
-      isPaid: input.isPaid ?? true,
-    })
-    .returning();
-
-  return {
-    id: created.id,
-    organizationId: created.organizationId,
-    premisesId: created.premisesId,
-    name: created.name,
-    date: String(created.date),
-    isPaid: created.isPaid,
-  };
-}
-
-export async function deleteHoliday(
-  fastify: FastifyInstance,
-  organizationId: string,
-  actorUserId: string,
-  holidayId: string
-) {
-  await fastify.db
-    .delete(schema.holidayCalendars)
-    .where(
-      and(
-        eq(schema.holidayCalendars.id, holidayId),
-        eq(schema.holidayCalendars.organizationId, organizationId)
-      )
-    );
-  return { deleted: true };
-}
-
+/**
+ * Purpose: Builds a comprehensive day-by-day work schedule for an employee between two dates.
+ * How it works: Enumerates dates in range, evaluates holiday calendar, weekly offs, and active shift assignments
+ * matching each day's weekday number. Resolves exact ISO start/end timestamps in organization timezone.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param staffProfileId Target employee UUID.
+ * @param fromDate Start date string (YYYY-MM-DD).
+ * @param toDate End date string (YYYY-MM-DD).
+ * @param timezone Organization timezone string (e.g., 'Asia/Kolkata').
+ * @returns Array of day schedule objects (type: SHIFT, HOLIDAY, WEEKLY_OFF, UNSCHEDULED).
+ */
 export async function buildSchedule(
   fastify: FastifyInstance,
   organizationId: string,
@@ -865,54 +838,10 @@ export async function buildSchedule(
   });
 }
 
-export async function resolveAssignmentForDate(
-  fastify: FastifyInstance,
-  staffProfileId: string,
-  date: string
-) {
-  const rows = await fastify.db
-    .select({
-      assignmentId: schema.employeeShiftAssignments.id,
-      templateId: schema.shifts.id,
-      startTime: schema.shifts.startTime,
-      endTime: schema.shifts.endTime,
-      halfDayThreshold: schema.shifts.halfDayThreshold,
-      dayName: schema.shifts.dayName,
-    })
-    .from(schema.employeeShiftAssignments)
-    .innerJoin(schema.shifts, eq(schema.employeeShiftAssignments.shiftId, schema.shifts.id))
-    .where(
-      and(
-        eq(schema.employeeShiftAssignments.employeeId, staffProfileId),
-        eq(schema.employeeShiftAssignments.isActive, true)
-      )
-    );
-
-  const targetDow = new Date(`${date}T00:00:00Z`).getUTCDay();
-  const match = rows.find((r) => getAssignedDayNumbers(r.dayName).includes(targetDow));
-
-  if (match) {
-    return {
-      assignmentId: match.assignmentId,
-      templateId: match.templateId,
-      startTime: match.startTime,
-      endTime: match.endTime,
-      breakMinutes: 0,
-      lateGraceMinutes: 15,
-      halfDayThresholdMinutes: 240,
-    };
-  }
-
-  return null;
-}
-
-export function scheduledMinutesFor(startTime: string, endTime: string, breakMinutes: number = 0): number {
-  const start = parseTimeToMinutes(startTime);
-  const end = parseTimeToMinutes(endTime);
-  const gross = end <= start ? 24 * 60 - start + end : end - start;
-  return Math.max(0, gross - breakMinutes);
-}
-
+/**
+ * Purpose: Resolves the configured timezone string for an organization.
+ * How it works: Queries `organizations.timezone` for `organizationId`. Defaults to `'UTC'` if missing.
+ */
 export async function resolveTimezone(fastify: FastifyInstance, organizationId: string): Promise<string> {
   const [organization] = await fastify.db
     .select({ timezone: schema.organizations.timezone })

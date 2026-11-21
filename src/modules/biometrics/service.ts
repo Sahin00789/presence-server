@@ -57,7 +57,15 @@ async function assertPremises(
 }
 
 /**
- * API Route 1: save the five supervised pose vectors for an employee.
+ * Purpose: Saves five supervised multi-pose face embedding vectors (center, left, right, up, down) for an employee.
+ * How it works: Validates liveness evidence, confirms employee profile and premises belong to caller organization,
+ * normalizes 128D floating point vectors, calculates quality/liveness scores, and performs an upsert (`onConflictDoUpdate`) on `multiPoseFaceTemplates`.
+ *
+ * @param fastify Fastify instance.
+ * @param actorUserId User ID performing enrollment (Owner).
+ * @param organizationId Target organization UUID.
+ * @param input EnrollMultiPoseInput containing `employeeProfileId`, 5 pose vectors, `modelVersion`, and `liveness` evidence.
+ * @returns Result object containing `employeeProfileId`, `modelVersion`, `poseCount`, scores, and ISO timestamp.
  */
 export async function saveMultiPoseEnrollment(
   fastify: FastifyInstance,
@@ -139,12 +147,15 @@ export async function saveMultiPoseEnrollment(
 }
 
 /**
- * API Route 2: identify an employee from a single live vector.
+ * Purpose: Identifies an employee from a single live 128D face embedding vector using PostgreSQL pgvector HNSW cosine distance queries.
+ * How it works: Queries each of the 5 pose columns (CENTER, LEFT, RIGHT, UP, DOWN) independently in `multiPoseFaceTemplates` table
+ * scoped strictly to `organizationId`, takes top candidates per pose column, ranks by maximum cosine similarity (1 - distance),
+ * and matches if similarity exceeds threshold (`FACE_EMBEDDING_SIMILARITY_THRESHOLD`).
  *
- * Each pose column is searched independently with pgvector's cosine distance
- * operator (`<=>`) and an HNSW index, then the union is ranked. The query is
- * always scoped to the caller's organization, so a vector from one tenant can
- * never match an employee in another tenant.
+ * @param fastify Fastify instance.
+ * @param organizationId Organization UUID for multi-tenant isolation.
+ * @param input Input object containing `liveVector` (or `embeddingVector`), optional `liveness` evidence and `premisesId`.
+ * @returns Result object with `matched: boolean`, `employeeProfileId`, `similarity`, `threshold`, and status message.
  */
 export async function matchLiveFaceVector(
   fastify: FastifyInstance,
@@ -280,6 +291,17 @@ export async function matchLiveFaceVector(
   };
 }
 
+/**
+ * Purpose: Checks whether a specific employee has an active multi-pose face template enrolled.
+ * How it works: Resolves employee by `employeeProfileId` or `userId`, queries `multiPoseFaceTemplates` table,
+ * and returns enrolled status, enrollment date, and model version.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param userId Authenticated user UUID.
+ * @param employeeProfileId Optional target employee UUID.
+ * @returns Object `{ enrolled: boolean, employeeProfileId, enrolledAt, modelVersion }`.
+ */
 export async function getMultiPoseEnrollmentStatus(
   fastify: FastifyInstance,
   organizationId: string,

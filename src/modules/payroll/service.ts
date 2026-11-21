@@ -3,7 +3,7 @@ import { and, asc, desc, eq, gte, inArray, lte, or, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
 import { findStaffProfile, resolveStaffProfile, listOrganizationStaff } from '../../shared/services/staff.service.js';
-import { dayOfWeek, enumerateDates, toDateISO } from '../../shared/utils/datetime.js';
+import { dayOfWeek, daysInMonth, enumerateDates, toDateISO } from '../../shared/utils/datetime.js';
 import { buildPdfReport, PdfTable } from '../../shared/utils/pdf.js';
 
 function getMonthDateRange(year: number, month: number) {
@@ -30,7 +30,17 @@ function toYmd(val: any): string {
 }
 
 /**
- * 1. Get monthly attendance statistics dynamically (calculated on-the-fly).
+ * Purpose: Dynamically calculates monthly attendance statistics for staff in a given month/year.
+ * How it works: Queries `employeeAttendance` events for date range to count present, half-day, absent, and leave shifts,
+ * counts holiday calendar entries, weekly off days, and approved overtime records.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param month Target month (1-12).
+ * @param year Target year (YYYY).
+ * @param premisesId Optional premises UUID filter.
+ * @param staffProfileId Optional employee UUID filter.
+ * @returns Array of calculated monthly attendance stat objects.
  */
 export async function getMonthlyAttendanceStats(
   fastify: FastifyInstance,
@@ -134,7 +144,16 @@ export async function getMonthlyAttendanceStats(
 }
 
 /**
- * Generates individual earning ledger entries idempotently.
+ * Purpose: Idempotently populates append-only `employeeEarningLedger` entries for an employee's worked shifts, paid holidays, weekly offs, and overtime.
+ * How it works: Evaluates worked attendance events, paid holidays, weekly off days, and completed overtime.
+ * Uses `sourceReference` deduplication keys and batched `onConflictDoNothing` inserts to prevent double-crediting earnings.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param premisesId Target premises UUID.
+ * @param staffProfileId Target employee UUID.
+ * @param month Target month (1-12).
+ * @param year Target year (YYYY).
  */
 export async function generateDailyEarningLedgerEntries(
   fastify: FastifyInstance,
@@ -513,7 +532,16 @@ export async function generateDailyEarningLedgerEntries(
 }
 
 /**
- * 2. Get or generate monthly payroll.
+ * Purpose: Retrieves or creates a monthly payroll record for an employee, reconciling total earnings and payments.
+ * How it works: Ensures daily ledger entries are generated, inserts missing `monthlyPayrolls` row, and invokes `reconcileMonthlyPayrollById()`.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param premisesId Target premises UUID.
+ * @param staffProfileId Target employee UUID.
+ * @param month Target month (1-12).
+ * @param year Target year (YYYY).
+ * @returns Reconciled monthly payroll object.
  */
 export async function getOrGenerateMonthlyPayroll(
   fastify: FastifyInstance,
@@ -621,7 +649,15 @@ async function reconcileMonthlyPayrollById(fastify: FastifyInstance, payrollId: 
 }
 
 /**
- * 3. Get monthly payroll summaries.
+ * Purpose: Lists monthly payroll summaries for all staff members in an organization.
+ * How it works: Iterates through staff list, calls `getOrGenerateMonthlyPayroll()` for each employee, and enriches with staff profile metadata.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param month Target month (1-12).
+ * @param year Target year (YYYY).
+ * @param premisesId Optional premises UUID filter.
+ * @returns Array of staff monthly payroll summary objects.
  */
 export async function listMonthlyPayrollSummaries(
   fastify: FastifyInstance,
@@ -657,7 +693,15 @@ export async function listMonthlyPayrollSummaries(
 }
 
 /**
- * 4. Get daily earning ledger entries.
+ * Purpose: Retrieves daily earning ledger entries for an employee in a given month.
+ * How it works: Queries `employeeEarningLedger` filtered by `organizationId`, `staffProfileId`, and month date range.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param staffProfileId Target employee UUID.
+ * @param month Target month (1-12).
+ * @param year Target year (YYYY).
+ * @returns Array of daily earning ledger entry objects.
  */
 export async function getDailyEarningLedger(
   fastify: FastifyInstance,
@@ -690,7 +734,15 @@ export async function getDailyEarningLedger(
 }
 
 /**
- * 5. Get daily earning totals.
+ * Purpose: Aggregates daily earning ledger entries by work date for an employee.
+ * How it works: Calls `getDailyEarningLedger()`, groups entries by date string, sums amounts per date, and returns sorted daily totals array.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param staffProfileId Target employee UUID.
+ * @param month Target month (1-12).
+ * @param year Target year (YYYY).
+ * @returns Sorted array of daily earning total objects.
  */
 export async function getDailyEarningTotals(
   fastify: FastifyInstance,
@@ -726,7 +778,15 @@ export async function getDailyEarningTotals(
 
 
 /**
- * 7. Record / delete salary payments.
+ * Purpose: Records a salary disbursement payment against a monthly payroll.
+ * How it works: Confirms monthly payroll exists, validates `amount` <= `dueAmount`, inserts row into `payrollTransactions`, and reconciles payroll balances.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param userId User ID recording transaction.
+ * @param input Input containing `monthlyPayrollId`, `amount`, `paymentDate`, `paymentMethod`, and optional `reference`.
+ * @returns Inserted transaction record.
+ * @throws AppError 404 if payroll not found; 400 if payment exceeds due balance.
  */
 export async function recordPayrollTransaction(
   fastify: FastifyInstance,
@@ -775,6 +835,16 @@ export async function recordPayrollTransaction(
   return transaction;
 }
 
+/**
+ * Purpose: Deletes a recorded salary payment transaction.
+ * How it works: Confirms transaction exists, deletes from `payrollTransactions`, and reconciles monthly payroll.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param transactionId Transaction UUID to delete.
+ * @returns Object `{ status: 'DELETED' }`.
+ * @throws AppError 404 if transaction not found.
+ */
 export async function deletePayrollTransaction(fastify: FastifyInstance, organizationId: string, transactionId: string) {
   const [txRecord] = await fastify.db
     .select({
@@ -800,6 +870,17 @@ export async function deletePayrollTransaction(fastify: FastifyInstance, organiz
   return { status: 'DELETED' };
 }
 
+/**
+ * Purpose: Updates an existing salary payment transaction details.
+ * How it works: Confirms transaction exists, updates specified fields in `payrollTransactions`, and reconciles monthly payroll.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param transactionId Transaction UUID.
+ * @param input Partial fields to update (`amount`, `paymentDate`, `paymentMethod`, `referenceNumber`, `notes`).
+ * @returns Updated transaction object.
+ * @throws AppError 404 if transaction not found.
+ */
 export async function updatePayrollTransaction(
   fastify: FastifyInstance,
   organizationId: string,
@@ -842,6 +923,15 @@ export async function updatePayrollTransaction(
   return updated;
 }
 
+/**
+ * Purpose: Lists all payment transactions recorded against a monthly payroll.
+ * How it works: Validates monthly payroll ownership if `organizationId` is provided, and queries `payrollTransactions` table.
+ *
+ * @param fastify Fastify instance.
+ * @param monthlyPayrollId Target monthly payroll UUID.
+ * @param organizationId Optional target organization UUID.
+ * @returns Array of payment transaction objects.
+ */
 export async function listPayrollTransactions(fastify: FastifyInstance, monthlyPayrollId: string, organizationId?: string) {
   if (organizationId) {
     const [payroll] = await fastify.db
@@ -870,11 +960,6 @@ function toCents(value: string | number | null | undefined): number {
 
 function toMoney(cents: number): string {
   return (Math.max(0, Math.round(cents)) / 100).toFixed(2);
-}
-
-export function daysInMonth(dateIso: string): number {
-  const [year, month] = dateIso.split('-').map(Number);
-  return new Date(Date.UTC(year, month, 0)).getUTCDate();
 }
 
 interface AssignmentPay {
@@ -926,6 +1011,17 @@ async function loadActiveAssignment(
   return assignment ?? null;
 }
 
+/**
+ * Purpose: Retrieves the configured shift pay rates (present, half-day, absent, leave) for an employee.
+ * How it works: Queries `employeeShiftAssignments` for active assignment, parses pay rates into whole paise/cents, and returns salary structure object.
+ *
+ * @param fastify Fastify instance.
+ * @param employeeId Target employee UUID.
+ * @param onDate Optional date string (YYYY-MM-DD).
+ * @param organizationId Optional target organization UUID.
+ * @returns Salary structure object.
+ * @throws AppError 404 if shift assignment pay is not configured.
+ */
 export async function getCurrentSalaryStructure(
   fastify: FastifyInstance,
   employeeId: string,

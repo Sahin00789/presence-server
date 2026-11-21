@@ -8,6 +8,20 @@ import { CreateEmployeeInput, EmployeeDto, UpdateEmployeeInput } from './schemas
 
 export const EMPLOYEE_TTL_HOURS = 48;
 
+/**
+ * Purpose: Creates a new employee record and user account in the organization (Owner only).
+ * How it works: Enforces `actorRole === 'OWNER'`, prevents adding the owner as an employee, validates premises assignment,
+ * checks for existing membership by email, generates unique staff code, inserts/updates `users` and `employees` rows in a transaction,
+ * and sends an onboarding email asynchronously.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param actorUserId User ID adding the employee.
+ * @param actorRole Role of caller (must be OWNER).
+ * @param input CreateEmployeeInput containing `email`, `fullName`, `premisesId`, `phone`, `department`, `designation`, `address`.
+ * @returns Created EmployeeDto containing profile details and initial balances.
+ * @throws AppError 403 if caller is not OWNER; 400 if owner email used or premises invalid; 409 if already an employee.
+ */
 export async function createEmployee(
   fastify: FastifyInstance,
   organizationId: string,
@@ -223,6 +237,16 @@ export async function createEmployee(
   };
 }
 
+/**
+ * Purpose: Lists all employees for an organization with optional premises and search filters.
+ * How it works: Queries `employees` joined with `users` and `premises`, computes accumulated ledger earnings and payroll paid/due balances.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param options Optional filters (`premisesId`, `search`).
+ * @param _role Caller role context.
+ * @returns Array of enriched EmployeeDto objects.
+ */
 export async function listEmployees(
   fastify: FastifyInstance,
   organizationId: string,
@@ -362,6 +386,18 @@ export async function listEmployees(
   });
 }
 
+/**
+ * Purpose: Retrieves a single employee record by employee ID.
+ * How it works: Calls `listEmployees()` for the organization and finds matching employee by `employeeId`.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param employeeId Target employee UUID.
+ * @param actorUserId User ID performing query.
+ * @param actorRole Role of caller.
+ * @returns EmployeeDto object.
+ * @throws AppError 404 if employee not found.
+ */
 export async function getEmployeeById(
   fastify: FastifyInstance,
   organizationId: string,
@@ -377,6 +413,16 @@ export async function getEmployeeById(
   return emp;
 }
 
+/**
+ * Purpose: Retrieves the caller's own employee profile.
+ * How it works: Calls `listEmployees()` for the organization and matches by authenticated `userId`.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param userId Authenticated user UUID.
+ * @returns EmployeeDto object.
+ * @throws AppError 404 if profile not found.
+ */
 export async function getSelfEmployeeProfile(
   fastify: FastifyInstance,
   organizationId: string,
@@ -394,6 +440,17 @@ export async function getSelfEmployeeProfile(
   return emp;
 }
 
+/**
+ * Purpose: Revokes / deactivates an employee account.
+ * How it works: Sets `isActive = false` and records `terminationDate` in `employees` table, and removes enrolled face biometrics in a transaction.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param actorUserId User ID deactivating the employee.
+ * @param employeeId Target employee UUID.
+ * @returns Object `{ revoked: true }`.
+ * @throws AppError 404 if employee record not found.
+ */
 export async function revokeEmployee(
   fastify: FastifyInstance,
   organizationId: string,
@@ -433,6 +490,20 @@ export async function revokeEmployee(
   return { revoked: true };
 }
 
+/**
+ * Purpose: Updates employee details (name, department, designation, premises, phone, address, avatar).
+ * How it works: Enforces role permissions (Employees can only update their own profile), validates target premises if changed,
+ * handles email remapping/user account creation if email updated by Owner, and updates `employees` and `users` tables in a transaction.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param employeeId Target employee UUID.
+ * @param actorUserId User ID making the update.
+ * @param actorRole Role of caller (OWNER or EMPLOYEE).
+ * @param input UpdateEmployeeInput object containing partial fields.
+ * @returns Updated EmployeeDto object.
+ * @throws AppError 404 if employee not found; 403 if unauthorized; 400 if invalid premises or email.
+ */
 export async function updateEmployee(
   fastify: FastifyInstance,
   organizationId: string,
@@ -638,6 +709,20 @@ export async function updateEmployee(
   return updated;
 }
 
+/**
+ * Purpose: Uploads and sets an employee's profile avatar photo.
+ * How it works: Resolves employee ID (handles `'me'` or `'my'`), verifies photo payload exists,
+ * and updates `avatarUrl` column on the associated `users` row.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param employeeId Target employee UUID (or `'me'`).
+ * @param actorUserId User ID performing upload.
+ * @param actorRole Role of caller.
+ * @param input Photo payload object (`photoBase64`, `photoUrl`, `avatarBase64`, `avatarUrl`).
+ * @returns Object `{ employeeId, avatarUrl }`.
+ * @throws AppError 400 if photo payload missing.
+ */
 export async function uploadEmployeePhoto(
   fastify: FastifyInstance,
   organizationId: string,

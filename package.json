@@ -29,6 +29,7 @@
     "fastify-type-provider-zod": "^4.0.2",
     "google-auth-library": "^11.3.3",
     "nodemailer": "^10.2.1",
+    "pdfkit": "^0.21.0",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
     "postgres": "^3.4.5",

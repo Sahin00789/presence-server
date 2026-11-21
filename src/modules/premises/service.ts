@@ -4,6 +4,14 @@ import { CreatePremisesInput, Premises, UpdatePremisesInput } from './schemas.js
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
 
+/**
+ * Purpose: Retrieves active premises list for an organization.
+ * How it works: Queries `premises` table where `organizationId` matches and `isActive` is `true`.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @returns Array of formatted Premises objects.
+ */
 export async function getPremises(
   fastify: FastifyInstance,
   organizationId: string
@@ -30,6 +38,14 @@ export async function getPremises(
   }));
 }
 
+/**
+ * Purpose: Resolves a single primary premises for an organization, creating a default one if none exist.
+ * How it works: Invokes `getPremises()`. If non-empty, returns the first premises. Otherwise creates a default "Main Premises" entry.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @returns Primary Premises instance.
+ */
 export async function getSinglePremises(
   fastify: FastifyInstance,
   organizationId: string
@@ -47,6 +63,15 @@ export async function getSinglePremises(
   });
 }
 
+/**
+ * Purpose: Creates a new premises work location with geofence settings.
+ * How it works: Inserts new row into `premises` and publishes a `premises_update` domain event over WebSocket stream.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param input CreatePremisesInput containing name, address, latitude, longitude, radiusMeters.
+ * @returns Created Premises object.
+ */
 export async function createPremises(
   fastify: FastifyInstance,
   organizationId: string,
@@ -88,6 +113,17 @@ export async function createPremises(
   return premises;
 }
 
+/**
+ * Purpose: Updates an existing premises location configuration (name, geofence coordinates, radius).
+ * How it works: Executes UPDATE query on `premises` table matching `premisesId` and `organizationId`, then publishes `premises_update` domain event.
+ *
+ * @param fastify Fastify instance.
+ * @param organizationId Target organization UUID.
+ * @param premisesId Target premises UUID.
+ * @param input UpdatePremisesInput partial fields.
+ * @returns Updated Premises object.
+ * @throws AppError 404 if premises location not found.
+ */
 export async function updatePremises(
   fastify: FastifyInstance,
   organizationId: string,

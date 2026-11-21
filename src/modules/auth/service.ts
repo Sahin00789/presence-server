@@ -122,6 +122,16 @@ async function resolveActiveMembership(
   return null;
 }
 
+/**
+ * Purpose: Generates and dispatches a 6-digit OTP code to a user's email for authentication or registration.
+ * How it works: Verifies role registration rules (unregistered employees cannot request OTP unless invited; unregistered owners cannot request OTP unless registering),
+ * generates cryptographically random 6-digit code, hashes code using SHA-256 into `otpRequests` table with a 10-minute TTL, and dispatches email via MailService.
+ *
+ * @param fastify Fastify instance.
+ * @param input OtpRequestInput object (`email`, `role`, optional `isRegistration`).
+ * @returns OtpResponse object containing `sent`, `email`, `expiresInSeconds`, and `devOtp` (in dev/test mode).
+ * @throws AppError 403 if user is unregistered for requested role; 409 if registering existing owner.
+ */
 export async function requestOtp(
   fastify: FastifyInstance,
   input: OtpRequestInput
@@ -265,6 +275,18 @@ export async function requestOtp(
   };
 }
 
+/**
+ * Purpose: Verifies a single-use 6-digit OTP code and issues authenticated session tokens.
+ * How it works: Queries active OTP request by email, checks max attempts (< 5), verifies SHA-256 hash match, marks OTP consumed,
+ * creates user/organization records if performing Owner registration, revokes prior active sessions (single-device concurrency enforcement),
+ * and issues JWT access token + rotating refresh token.
+ *
+ * @param fastify Fastify instance.
+ * @param input OtpVerifyInput (`email`, `code`, `role`, optional registration fields and device context).
+ * @param deviceContext Device metadata (ipAddress, userAgent, deviceName).
+ * @returns AuthResponse containing access token (15m expiry), refresh token, loggedDeviceId, and user workspace profile.
+ * @throws AppError 400 if OTP invalid or expired; 429 if max attempts exceeded; 403 if account deactivated.
+ */
 export async function verifyOtp(
   fastify: FastifyInstance,
   input: OtpVerifyInput,
@@ -500,6 +522,17 @@ async function resolveGoogleProfile(
   );
 }
 
+/**
+ * Purpose: Authenticates a user using Google OAuth 2.0 Single Sign-On (ID token or server authorization code).
+ * How it works: Verifies Google token/code via `GoogleAuthService`, checks `googleIdentities` and `users` tables,
+ * confirms active workspace membership, revokes prior active sessions (single-device concurrency rule), and issues session tokens.
+ *
+ * @param fastify Fastify instance.
+ * @param input GoogleExchangeInput containing `idToken` or `code`.
+ * @param deviceContext Optional client device metadata.
+ * @returns AuthResponse containing access token, refresh token, loggedDeviceId, and user workspace profile.
+ * @throws AppError 403 if account is unregistered or deactivated; 401 if Google verification fails.
+ */
 export async function processGoogleExchange(
   fastify: FastifyInstance,
   input: GoogleExchangeInput,
@@ -581,6 +614,17 @@ export async function processGoogleExchange(
   });
 }
 
+/**
+ * Purpose: Registers a new Organization Owner account using Google OAuth Single Sign-On.
+ * How it works: Verifies Google ID token, checks for existing user/identity conflicts, creates `users`, `organizations`, `googleIdentities`, and primary `premises` rows in a transaction,
+ * and issues authenticated Owner session tokens.
+ *
+ * @param fastify Fastify instance.
+ * @param input GoogleOwnerRegistrationInput (`idToken`, `organizationName`, `premisesName`, etc.).
+ * @param deviceContext Optional client device metadata.
+ * @returns AuthResponse containing access token, refresh token, loggedDeviceId, and Owner profile.
+ * @throws AppError 409 if user or Google account already registered.
+ */
 export async function processGoogleOwnerRegistration(
   fastify: FastifyInstance,
   input: GoogleOwnerRegistrationInput,
@@ -706,20 +750,15 @@ async function rotateRefreshToken(
   const presentedHash = hashRefreshToken(presentedToken, env.REFRESH_TOKEN_SECRET);
 
   return fastify.db.transaction(async (tx) => {
-    const conditions = [
-      or(
-        eq(schema.loggedDevices.refreshTokenHash, presentedHash),
-        eq(schema.loggedDevices.previousRefreshTokenHash, presentedHash)
-      ),
-    ];
-    if (expectedDeviceId) {
-      conditions.push(eq(schema.loggedDevices.id, expectedDeviceId));
-    }
-
     const [device] = await tx
       .select()
       .from(schema.loggedDevices)
-      .where(and(...conditions))
+      .where(
+        or(
+          eq(schema.loggedDevices.refreshTokenHash, presentedHash),
+          eq(schema.loggedDevices.previousRefreshTokenHash, presentedHash)
+        )
+      )
       .limit(1)
       .for('update');
 
@@ -794,6 +833,17 @@ async function rotateRefreshToken(
   });
 }
 
+/**
+ * Purpose: Performs atomic refresh token rotation to grant a new short-lived JWT access token and new rotating refresh token.
+ * How it works: Locks session row with `SELECT FOR UPDATE` inside `rotateRefreshToken()`. Evaluates reuse/replay attack protection,
+ * issues new refresh token hash, and returns a new 15-minute JWT access token.
+ *
+ * @param fastify Fastify instance.
+ * @param input RefreshTokenInput containing `refreshToken` and optional `loggedDeviceId`.
+ * @param deviceContext Optional client device metadata.
+ * @returns AuthResponse containing fresh access token (15m), rotating refresh token, and user profile.
+ * @throws AppError 401 if refresh token invalid, expired, revoked or reused; 403 if account deactivated.
+ */
 export async function processRefreshToken(
   fastify: FastifyInstance,
   input: RefreshTokenInput,
@@ -906,6 +956,15 @@ export async function processRefreshToken(
   };
 }
 
+/**
+ * Purpose: Retrieves current authenticated user details and workspace profile.
+ * How it works: Queries `users` table for `userId` and resolves active organization membership via `resolveActiveMembership()`.
+ *
+ * @param fastify Fastify instance.
+ * @param userId Target user UUID.
+ * @returns AuthUser workspace profile.
+ * @throws AppError 404 if user not found; 403 if no active membership found.
+ */
 export async function processGetCurrentUser(
   fastify: FastifyInstance,
   userId: string
@@ -939,6 +998,15 @@ export async function processGetCurrentUser(
   };
 }
 
+/**
+ * Purpose: Updates user profile fields (`fullName`, `phone`, `avatarUrl`).
+ * How it works: Executes UPDATE on `users` table for `userId` and returns refreshed profile via `processGetCurrentUser()`.
+ *
+ * @param fastify Fastify instance.
+ * @param userId Target user UUID.
+ * @param input Profile update input fields.
+ * @returns Refreshed AuthUser profile.
+ */
 export async function processUpdateProfile(
   fastify: FastifyInstance,
   userId: string,
@@ -968,6 +1036,15 @@ export async function processUpdateProfile(
   return processGetCurrentUser(fastify, userId);
 }
 
+/**
+ * Purpose: Logs out current active device session.
+ * How it works: Sets `isActive = false` and records `revokedReason = 'LOGOUT'` in `loggedDevices` for matching `userId` and session `jti`.
+ *
+ * @param fastify Fastify instance.
+ * @param userId Target user UUID.
+ * @param jti JWT session identifier.
+ * @returns LogoutResponse `{ loggedOut: true }`.
+ */
 export async function processLogout(
   fastify: FastifyInstance,
   userId: string,
@@ -994,6 +1071,14 @@ export async function processLogout(
   return { loggedOut: true };
 }
 
+/**
+ * Purpose: Logs out all active device sessions for a user across all devices.
+ * How it works: Deactivates every active session row in `loggedDevices` matching `userId` and records `revokedReason = 'LOGOUT_ALL'`.
+ *
+ * @param fastify Fastify instance.
+ * @param userId Target user UUID.
+ * @returns LogoutResponse `{ loggedOut: true, revokedSessions }`.
+ */
 export async function processLogoutAll(
   fastify: FastifyInstance,
   userId: string
@@ -1031,6 +1116,15 @@ export async function processLogoutAll(
   return { loggedOut: true, revokedSessions: revokedCount };
 }
 
+/**
+ * Purpose: Lists all active and historical logged devices for a user.
+ * How it works: Queries `loggedDevices` for `userId` ordered by `lastActiveAt` descending, flagging current device session matching `currentJti`.
+ *
+ * @param fastify Fastify instance.
+ * @param userId Target user UUID.
+ * @param currentJti Optional active JWT session identifier.
+ * @returns LoggedDevicesResponse array.
+ */
 export async function processGetLoggedDevices(
   fastify: FastifyInstance,
   userId: string,
@@ -1061,6 +1155,16 @@ export async function processGetLoggedDevices(
   return { devices };
 }
 
+/**
+ * Purpose: Revokes a specific logged device session by device session ID.
+ * How it works: Queries `loggedDevices` for `deviceId` matching `userId`. If active, deactivates row and sets `revokedReason = 'REVOKED_BY_USER'`.
+ *
+ * @param fastify Fastify instance.
+ * @param userId Authenticated user UUID.
+ * @param deviceId Target device session UUID.
+ * @returns LogoutResponse `{ loggedOut: true }`.
+ * @throws AppError 404 if device session not found.
+ */
 export async function processRevokeLoggedDevice(
   fastify: FastifyInstance,
   userId: string,

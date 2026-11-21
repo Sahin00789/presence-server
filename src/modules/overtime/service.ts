@@ -9,7 +9,14 @@ import { CreateOvertimeInput } from './schemas.js';
 
 type Actor = { userId: string; role: 'OWNER' | 'EMPLOYEE' };
 
-/** Net planned overtime minutes for a time window (overnight shifts included). */
+/**
+ * Purpose: Calculates net planned overtime duration in minutes for a given time window.
+ * How it works: Parses `startTime` and `endTime` into minute offsets. Handles overnight shifts crossing midnight and returns gross minutes.
+ *
+ * @param startTime Start time string (HH:MM:SS or HH:MM).
+ * @param endTime End time string (HH:MM:SS or HH:MM).
+ * @returns Non-negative planned overtime duration in minutes.
+ */
 export function plannedOvertimeMinutes(startTime: string, endTime: string): number {
   const start = parseTimeToMinutes(startTime);
   const end = parseTimeToMinutes(endTime);
@@ -18,10 +25,15 @@ export function plannedOvertimeMinutes(startTime: string, endTime: string): numb
 }
 
 /**
- * Lists overtime entries.
+ * Purpose: Retrieves a list of overtime entries for an organization.
+ * How it works: Scopes query to `organizationId`. If actor is EMPLOYEE, restricts to their own entries.
+ * Filters by optional `from`/`to` date range, `staffProfileId`, and `status`. Returns formatted array.
  *
- * - STAFF -> only their own entries.
- * - OWNER / MANAGER -> every entry of the organization, optionally narrowed.
+ * @param fastify Fastify instance.
+ * @param actor Object containing `userId` and `role`.
+ * @param organizationId Target organization UUID.
+ * @param query Filters (`from`, `to`, `staffProfileId`, `status`).
+ * @returns Array of formatted overtime records.
  */
 export async function listOvertime(
   fastify: FastifyInstance,
@@ -99,6 +111,18 @@ export async function listOvertime(
  * the entry is raised for the caller themselves, so a Manager can create and
  * work their own overtime. The entry is created in the `APPROVED` state - the
  * creator is the approver - so the staff member can immediately check in.
+ */
+/**
+ * Purpose: Creates a new pre-approved overtime entry for an employee (Owner only).
+ * How it works: Enforces Owner role permission, verifies target employee exists and has a premises assigned, calculates planned duration,
+ * checks for time overlap with assigned shifts on the work date, and inserts new `overtime` row with status `CREATED`.
+ *
+ * @param fastify Fastify instance.
+ * @param actor Caller identity object (`userId`, `role`).
+ * @param organizationId Target organization UUID.
+ * @param input CreateOvertimeInput (`staffProfileId`, `workDate`, `startTime`, `endTime`, `paymentInr`, `reason`).
+ * @returns Created overtime record object.
+ * @throws AppError 403 if caller not OWNER; 400 if target missing, invalid window or overlaps with shift; 404 if staff not found.
  */
 export async function createOvertime(
   fastify: FastifyInstance,
@@ -273,7 +297,15 @@ export async function createOvertime(
 }
 
 /**
- * Cancels an overtime entry that has not been worked yet.
+ * Purpose: Cancels an overtime entry that has not been started yet.
+ * How it works: Queries `overtime` table matching `overtimeId` and `organizationId`. Prevents cancellation if status is `IN_PROGRESS` or `COMPLETED`. Updates status to `CANCELLED`.
+ *
+ * @param fastify Fastify instance.
+ * @param actor Caller identity object.
+ * @param organizationId Target organization UUID.
+ * @param overtimeId Overtime entry UUID to cancel.
+ * @returns Object `{ id, status: 'CANCELLED' }`.
+ * @throws AppError 404 if not found; 409 if already started or completed.
  */
 export async function cancelOvertime(
   fastify: FastifyInstance,

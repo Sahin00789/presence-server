@@ -28,6 +28,10 @@ function formatShiftHours(startTime?: string | null, endTime?: string | null): s
   return `${startTime.slice(0, 5)} - ${endTime.slice(0, 5)}`;
 }
 
+/**
+ * Purpose: Formats raw database leave row into a camelCase client-facing DTO.
+ * How it works: Maps database columns to schema shape including `staffName`, `staffCode`, `premisesName`, `shiftName`, `shiftHours`, and reviewer details.
+ */
 export function mapLeave(row: {
   leave: typeof schema.leaveRequests.$inferSelect;
   staffName: string;
@@ -69,6 +73,17 @@ export function mapLeave(row: {
   };
 }
 
+/**
+ * Purpose: Lists upcoming scheduled shifts for an employee over the next N days available for leave selection.
+ * How it works: Resolves employee profile, queries active shift assignments, enumerates dates for the next N days,
+ * matches weekday assignments, and flags shifts that already have active leave requests.
+ *
+ * @param fastify Fastify instance.
+ * @param user Authenticated user context (`userId`, `role`).
+ * @param organizationId Target organization UUID.
+ * @param days Horizon days to project (default 14).
+ * @returns Array of upcoming shift objects with `alreadyRequested` boolean.
+ */
 export async function listUpcomingShiftsForLeave(
   fastify: FastifyInstance,
   user: { userId: string; role: Role },
@@ -158,6 +173,18 @@ export async function listUpcomingShiftsForLeave(
   return upcomingShifts;
 }
 
+/**
+ * Purpose: Creates new leave request(s) for selected shift assignment(s) and work date(s).
+ * How it works: Resolves employee profile, validates shift assignments belong to employee, checks for existing leave/attendance conflicts,
+ * inserts `leaveRequests` row with status `PENDING`, and dispatches `LEAVE_REQUESTED` notifications to Owners.
+ *
+ * @param fastify Fastify instance.
+ * @param user Authenticated user context.
+ * @param organizationId Target organization UUID.
+ * @param input Input object containing selected shift assignment & date pairs, and `reason`.
+ * @returns Array of created formatted leave request objects.
+ * @throws AppError 404 if profile/shift not found; 409 if leave request overlaps or attendance conflict exists.
+ */
 export async function createLeaveRequest(
   fastify: FastifyInstance,
   user: { userId: string; role: Role },
@@ -330,6 +357,16 @@ export async function createLeaveRequest(
   return createdLeaves;
 }
 
+/**
+ * Purpose: Lists leave requests for an organization filtered by role permissions and query parameters.
+ * How it works: For Employees, filters strictly to their own requests. For Owners, allows filtering by `staffProfileId`, `premisesId`, `status`, `from`/`to` date range.
+ *
+ * @param fastify Fastify instance.
+ * @param user Authenticated user context.
+ * @param organizationId Target organization UUID.
+ * @param query Optional filters (`status`, `premisesId`, `staffId`, `from`, `to`).
+ * @returns Array of mapped leave request objects.
+ */
 export async function listLeaveRequests(
   fastify: FastifyInstance,
   user: { userId: string; role: Role },
@@ -398,6 +435,17 @@ export async function listLeaveRequests(
   return rows.map(mapLeave);
 }
 
+/**
+ * Purpose: Retrieves detailed information for a single leave request.
+ * How it works: Queries `leaveRequests` joined with employee, user, premises, shift, and reviewing user details.
+ *
+ * @param fastify Fastify instance.
+ * @param user Authenticated user context.
+ * @param organizationId Target organization UUID.
+ * @param leaveRequestId Target leave request UUID.
+ * @returns Mapped leave request detail object.
+ * @throws AppError 404 if leave request not found.
+ */
 export async function getLeaveRequestDetails(
   fastify: FastifyInstance,
   user: { userId: string; role: Role },
@@ -448,6 +496,19 @@ export async function getLeaveRequestDetails(
   return mapLeave(row);
 }
 
+/**
+ * Purpose: Approves or rejects a pending leave request (Owner only).
+ * How it works: Confirms request status is `PENDING`. If APPROVED, opens a database transaction to create/update an `employeeAttendance` record with status `LEAVE`,
+ * calculates shift end timestamp to record leave pay earnings if past, updates `leaveRequests` status to APPROVED/REJECTED with remarks, and notifies the requesting employee.
+ *
+ * @param fastify Fastify instance.
+ * @param actorUserId Reviewing user UUID (Owner).
+ * @param organizationId Target organization UUID.
+ * @param leaveRequestId Target leave request UUID.
+ * @param input Review input (`decision: 'APPROVED' | 'REJECTED'`, optional `reviewRemarks`).
+ * @returns Mapped leave request object.
+ * @throws AppError 404 if not found; 409 if already reviewed or attendance conflict exists.
+ */
 export async function reviewLeaveRequest(
   fastify: FastifyInstance,
   actorUserId: string,
@@ -700,6 +761,17 @@ export async function reviewLeaveRequest(
   });
 }
 
+/**
+ * Purpose: Allows an employee to cancel their own pending leave request.
+ * How it works: Verifies the request belongs to caller user ID and status is `PENDING`. Updates status to `CANCELLED`.
+ *
+ * @param fastify Fastify instance.
+ * @param userId Authenticated user UUID.
+ * @param organizationId Target organization UUID.
+ * @param leaveRequestId Target leave request UUID.
+ * @returns Object `{ id, status: 'CANCELLED' }`.
+ * @throws AppError 404 if not found; 403 if not request owner; 409 if status not pending.
+ */
 export async function cancelLeaveRequest(
   fastify: FastifyInstance,
   userId: string,

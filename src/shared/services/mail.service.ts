@@ -3,6 +3,10 @@ import { env } from '../../config/env.js';
 
 let transporter: Transporter | null = null;
 
+/**
+ * Purpose: Resets the cached Nodemailer SMTP transporter instance.
+ * How it works: Sets `transporter = null`, forcing the next email operation to re-initialize SMTP connection settings.
+ */
 export function resetMailTransporter(): void {
   transporter = null;
 }
@@ -53,6 +57,15 @@ export interface SendOtpEmailParams {
   };
 }
 
+/**
+ * Purpose: Sends a 6-digit OTP verification email via SMTP Nodemailer transporter.
+ * How it works: Checks SMTP configuration; builds a responsive HTML email template containing the 6-digit OTP code with a 10-minute expiry notice;
+ * dispatches email via Nodemailer `sendMail` with High priority header.
+ *
+ * @param params Object containing `to` recipient email, 6-digit `code`, optional `role`, and `logger`.
+ * @returns Promise resolving to `true` if delivered successfully; `false` if SMTP is unconfigured in dev mode.
+ * @throws Error in production if SMTP credentials are missing or if `sendMail` fails.
+ */
 export async function sendOtpEmail(params: SendOtpEmailParams): Promise<boolean> {
   const mailTransporter = getTransporter();
 
@@ -237,6 +250,13 @@ export interface SendUserCreationEmailParams {
 
 export type SendInvitationEmailParams = SendUserCreationEmailParams;
 
+/**
+ * Purpose: Sends an onboarding welcome email to a newly added employee.
+ * How it works: Renders an HTML email informing the recipient they have been added to the organization with their role badge and instructions to sign in.
+ *
+ * @param params Object containing `to` email, `role`, `organizationName`, optional `invitedByName`, and `logger`.
+ * @returns Promise resolving to `true` if email was sent; `false` otherwise.
+ */
 export async function sendUserCreationEmail(params: SendUserCreationEmailParams): Promise<boolean> {
   const mailTransporter = getTransporter();
 
@@ -372,6 +392,13 @@ export interface SendOrganizationWelcomeEmailParams {
   };
 }
 
+/**
+ * Purpose: Sends a welcome email to an Organization Owner after creating a new organization.
+ * How it works: Renders an HTML email detailing the workspace name, primary premises configuration, GPS geofence radius, and next steps.
+ *
+ * @param params Object containing `to`, `ownerName`, `organizationName`, optional premises details, and `logger`.
+ * @returns Promise resolving to `true` if email was sent; `false` otherwise.
+ */
 export async function sendOrganizationWelcomeEmail(params: SendOrganizationWelcomeEmailParams): Promise<boolean> {
   const mailTransporter = getTransporter();
 
@@ -533,6 +560,13 @@ export interface SendMonthlyReportEmailParams {
   };
 }
 
+/**
+ * Purpose: Dispatches automated monthly summary reports with PDF and CSV attachments to owners or staff.
+ * How it works: Attaches `pdfBuffer` and `csvContent` files to email and sends via Nodemailer transporter.
+ *
+ * @param params Object containing `to`, `recipientName`, `role`, `organizationName`, `month`, `year`, optional `pdfBuffer`, `csvContent`, and `logger`.
+ * @returns Promise resolving to `true` if delivered; `false` otherwise.
+ */
 export async function sendMonthlyReportEmail(params: SendMonthlyReportEmailParams): Promise<boolean> {
   const mailTransporter = getTransporter();
 
