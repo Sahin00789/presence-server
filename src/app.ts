@@ -24,7 +24,6 @@ import { reportRoutes } from './modules/reports/routes.js';
 import { locationRoutes } from './modules/location/routes.js';
 import { startAutoShiftOvertimeJob } from './jobs/autoShiftOvertimePresenter.js';
 import { startHolidayWeeklyOffEarningsJob } from './jobs/holidayWeeklyOffEarnings.js';
-import { startLeaveEarningsJob } from './jobs/leaveEarnings.js';
 import { AppError } from './shared/errors/app-error.js';
 
 export function buildApp() {
@@ -81,7 +80,6 @@ export function buildApp() {
   // Register Background Jobs
   startAutoShiftOvertimeJob(app);
   startHolidayWeeklyOffEarningsJob(app);
-  startLeaveEarningsJob(app);
 
   // Global Root Endpoint
   app.get('/', async () => {

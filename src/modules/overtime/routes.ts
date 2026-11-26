@@ -8,10 +8,18 @@ import {
 } from './schemas.js';
 import { cancelOvertime, createOvertime, listOvertime } from './service.js';
 
+/**
+ * Overtime Scheduling Routes Plugin.
+ * Purpose: Exposes REST API endpoints for listing overtime entries, scheduling planned overtime, and cancelling unworked overtime.
+ * Delegates business logic to overtime service.
+ */
 export async function overtimeRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
-  // List Overtime Entries (Default/General)
+  /**
+   * Purpose: List overtime entries for employee or owner view.
+   * Service Delegation: Calls `listOvertime()`.
+   */
   server.get(
     '/api/v1/overtime',
     {

@@ -2,9 +2,8 @@ import { FastifyInstance } from 'fastify';
 import { and, desc, eq } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
-import { ensureStaffProfile, findStaffProfile } from '../../shared/services/staff.service.js';
+import { findStaffProfile } from '../../shared/services/staff.service.js';
 import { isOvernightShift, parseTimeToMinutes } from '../../shared/utils/datetime.js';
-import { getAssignedDayNumbers } from '../shifts/service.js';
 import { CreateOvertimeInput } from './schemas.js';
 
 type Actor = { userId: string; role: 'OWNER' | 'EMPLOYEE' };

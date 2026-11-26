@@ -19,8 +19,8 @@ export interface DomainEvent {
   userIds?: string[];
   /** Target premises ID room. */
   premisesId?: string | null;
-  /** Specific roles allowed to receive this event (e.g. ['OWNER', 'MANAGER']). Defaults to all if omitted. */
-  targetRoles?: ('OWNER' | 'MANAGER' | 'STAFF')[];
+  /** Specific roles allowed to receive this event (e.g. ['OWNER', 'EMPLOYEE']). Defaults to all if omitted. */
+  targetRoles?: ('OWNER' | 'EMPLOYEE')[];
   payload: Record<string, unknown>;
   /** Identifies the API instance that published the event, preventing echo delivery. */
   originId?: string;

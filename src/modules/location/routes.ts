@@ -10,9 +10,18 @@ import {
   getTodayLocationPresence,
 } from './service.js';
 
+/**
+ * Live Location & Geofence Monitoring Routes Plugin.
+ * Purpose: Exposes HTTP endpoints for tracking real-time workforce presence, active shift sessions, and GPS location monitoring.
+ * Delegates business logic to location service.
+ */
 export async function locationRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
+  /**
+   * Purpose: Handler for real-time workforce location presence queries.
+   * Service Delegation: Calls `getTodayLocationPresence()`.
+   */
   const presenceHandler = async (request: any, reply: any) => {
     const { premisesId, date } = request.query as {
       premisesId?: string;

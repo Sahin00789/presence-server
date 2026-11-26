@@ -492,6 +492,8 @@ export const unworkedPaymentRules = pgTable('unworked_payment_rules', {
   employeeId: uuid('employee_id').references(() => employees.id, { onDelete: 'cascade' }),
   dayType: unworkedDayTypeEnum('day_type').notNull(),
   paymentInr: bigint('payment_inr', { mode: 'number' }).notNull().default(0),
+  holidayPay: bigint('holiday_pay', { mode: 'number' }).notNull().default(0),
+  offDayPay: bigint('off_day_pay', { mode: 'number' }).notNull().default(0),
   multiplierBasisPoints: integer('multiplier_basis_points').notNull().default(15000),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [

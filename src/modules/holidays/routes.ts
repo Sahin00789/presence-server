@@ -4,9 +4,17 @@ import { z } from 'zod';
 import { createHolidaySchema, holidaySchema, updateHolidaySchema } from './schemas.js';
 import { createHoliday, deleteHoliday, listHolidays, updateHoliday } from './service.js';
 
+/**
+ * Holiday Management Routes Plugin.
+ * Purpose: Exposes HTTP endpoints for managing organization holiday calendar entries. Delegates to holiday service.
+ */
 export async function holidayRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
+  /**
+   * Purpose: Handler listing holiday calendar entries for an organization or premises.
+   * Service Delegation: Calls `listHolidays()` in holiday service.
+   */
   const handleListHolidays = async (request: any, reply: any) => {
     const { from, to, premisesId } = request.query as { from?: string; to?: string; premisesId?: string };
     const result = await listHolidays(fastify, request.user.organizationId, from, to, premisesId);

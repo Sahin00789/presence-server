@@ -20,9 +20,18 @@ import {
   uploadOwnerPhoto,
 } from './service.js';
 
+/**
+ * Organization Management Routes Plugin.
+ * Purpose: Exposes HTTP endpoints for organization registration, profile updates, member management, and logo/avatar uploads.
+ * Delegates business logic to organization service.
+ */
 export async function organizationRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
+  /**
+   * Purpose: Retrieve active organization summary for calling user session.
+   * Service Delegation: Calls `getOrganizationSummary()`.
+   */
   server.get(
     '/api/v1/organizations/current',
     {

@@ -17,9 +17,18 @@ import {
   reviewLeaveRequest,
 } from './service.js';
 
+/**
+ * Leave Management Routes Plugin.
+ * Purpose: Provides REST endpoints for employees to view upcoming shift assignments, submit leave requests, cancel pending requests,
+ * and for owners to list, inspect, approve, or reject leave applications. Delegates business logic to leave service.
+ */
 export async function leaveRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
+  /**
+   * Purpose: Retrieve upcoming shift assignments for requesting leave.
+   * Service Delegation: Calls `listUpcomingShiftsForLeave()`.
+   */
   server.get(
     '/api/v1/leave/upcoming-shifts',
     {

@@ -26,10 +26,18 @@ import {
   updatePayrollTransaction,
 } from './service.js';
 
+/**
+ * Monthly Payroll Engine & Salary Ledger Routes Plugin.
+ * Purpose: Exposes HTTP endpoints for monthly payroll calculations, staff earning ledger views, payslip PDF downloads,
+ * manual payroll transactions/adjustments, and unworked payment rules configuration. Delegates logic to payroll service.
+ */
 export async function payrollRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
-  // 1. Get monthly payroll report
+  /**
+   * Purpose: Retrieve or calculate monthly payroll report for employee or premises.
+   * Service Delegation: Calls `getOrGenerateMonthlyPayroll()`.
+   */
   server.get(
     '/api/v1/payroll/monthly',
     {

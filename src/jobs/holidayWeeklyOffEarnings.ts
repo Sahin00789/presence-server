@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { and, asc, eq, gte, lte, sql } from 'drizzle-orm';
 import * as schema from '../db/schema.js';
 import { resolveTimezone } from '../modules/shifts/service.js';
+import { getWatermarkFromDate } from './watermark.js';
 import { addDays, dayOfWeek, enumerateDates, toDateISO, toDateISOInTimeZone } from '../shared/utils/datetime.js';
 
 export async function getUnworkedPaymentAmount(
@@ -30,6 +31,14 @@ export async function getUnworkedPaymentAmount(
     .limit(1);
 
   if (rule) {
+    if (dayType === 'HOLIDAY') {
+      const hPay = Number((rule as any).holidayPay ?? 0);
+      if (hPay > 0) return hPay;
+    }
+    if (dayType === 'WEEKLY_OFF') {
+      const oPay = Number((rule as any).offDayPay ?? 0);
+      if (oPay > 0) return oPay;
+    }
     const amt = Number((rule as any).paymentInr ?? (rule as any).paymentPaise ?? 0);
     return amt;
   }
@@ -304,8 +313,8 @@ export function startHolidayWeeklyOffEarningsJob(fastify: FastifyInstance): void
   };
 
   fastify.addHook('onListen', async () => {
-    setTimeout(run, 3000);
-    timer = setInterval(run, 60_000);
+    setTimeout(run, 3000); // Initial check on server start
+    timer = setInterval(run, 15 * 60_000); // Lightweight periodic check every 15 minutes
     timer.unref?.();
   });
 

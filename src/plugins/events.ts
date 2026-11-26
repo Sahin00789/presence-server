@@ -13,7 +13,7 @@ import {
 interface WsClient {
   userId: string;
   organizationId: string;
-  role: 'OWNER' | 'MANAGER' | 'STAFF';
+  role: 'OWNER' | 'EMPLOYEE';
   premisesId?: string | null;
   sessionJti: string;
   subscribedPremisesIds: Set<string>;
@@ -57,7 +57,7 @@ declare module 'fastify' {
 
 /**
  * WebSocket transport for real-time ledger, attendance, location, and notification updates
- * with organization, owner/manager, and premises room targeting.
+ * with multi-tenant organization, owner, role, user, and premises room targeting.
  */
 export default fp(async (fastify: FastifyInstance) => {
   await fastify.register(fastifyWebsocket, {
@@ -69,32 +69,43 @@ export default fp(async (fastify: FastifyInstance) => {
   const clients = new Set<WsClient>();
 
   const dispatch = (event: DomainEvent) => {
+    const actorId =
+      (event.payload?.actorId as string) ??
+      (event.payload?.userId as string) ??
+      null;
+
     const payloadString = JSON.stringify({
       event: event.type,
-      data: event.payload,
       premisesId: event.premisesId ?? null,
       emittedAt: event.emittedAt ?? new Date().toISOString(),
+      data: {
+        ...event.payload,
+        actorId,
+      },
     });
 
     for (const client of clients) {
-      // 1. Must belong to the same organization
+      // 1. STRICT Multi-Tenancy Isolation: Must belong to the same organization
       if (client.organizationId !== event.organizationId) {
         continue;
       }
 
-      // 2. Role targeting check (Owners & Managers receive all operational events)
-      const isOwnerOrManager = client.role === 'OWNER' || client.role === 'MANAGER';
+      const isOwner = client.role === 'OWNER';
 
-      if (event.targetRoles && event.targetRoles.length > 0) {
-        if (!event.targetRoles.includes(client.role) && !isOwnerOrManager) {
+      // 2. User ID targeting check (e.g. personal notification, private ledger or user alert)
+      if (event.userIds && event.userIds.length > 0) {
+        const isDirectRecipient = event.userIds.includes(client.userId);
+        const isTargetedRole = event.targetRoles && event.targetRoles.includes(client.role);
+        if (!isDirectRecipient && !isTargetedRole) {
           continue;
         }
       }
 
-      // 3. User ID targeting check
-      if (event.userIds && event.userIds.length > 0) {
-        const isDirectRecipient = event.userIds.includes(client.userId);
-        if (!isDirectRecipient && !isOwnerOrManager) {
+      // 3. Role targeting check
+      if (event.targetRoles && event.targetRoles.length > 0) {
+        const isTargetRole = event.targetRoles.includes(client.role);
+        const isTargetUser = event.userIds && event.userIds.includes(client.userId);
+        if (!isTargetRole && !isTargetUser) {
           continue;
         }
       }
@@ -104,7 +115,9 @@ export default fp(async (fastify: FastifyInstance) => {
         const isPremisesSubscribed =
           client.premisesId === event.premisesId ||
           client.subscribedPremisesIds.has(event.premisesId);
-        if (!isPremisesSubscribed && !isOwnerOrManager) {
+        // Owners in the org manage all premises in their organization.
+        // Employees MUST belong or be subscribed to the premises room.
+        if (!isPremisesSubscribed && !isOwner) {
           continue;
         }
       }
@@ -177,7 +190,7 @@ export default fp(async (fastify: FastifyInstance) => {
         return;
       }
 
-      const clientRole = (payload.role?.toUpperCase() as 'OWNER' | 'MANAGER' | 'STAFF') || 'STAFF';
+      const clientRole = (payload.role?.toUpperCase() as 'OWNER' | 'EMPLOYEE') || 'EMPLOYEE';
 
       const client: WsClient = {
         userId: payload.userId,
@@ -203,6 +216,13 @@ export default fp(async (fastify: FastifyInstance) => {
             userId: payload.userId,
             organizationId: payload.organizationId,
             role: clientRole,
+            premisesId: payload.premisesId ?? null,
+            rooms: [
+              `org:${payload.organizationId}`,
+              `user:${payload.userId}`,
+              `role:${payload.organizationId}:${clientRole}`,
+              ...(payload.premisesId ? [`premises:${payload.premisesId}`] : []),
+            ],
           },
         })
       );
@@ -238,9 +258,7 @@ export default fp(async (fastify: FastifyInstance) => {
         }
       });
 
-      // Heartbeat / ping interval. The session is revalidated on every beat so
-      // that revoking a device (or rotating/reusing a refresh token) also tears
-      // down an already-open socket.
+      // Heartbeat / ping interval
       const pingInterval = setInterval(() => {
         if (socket.readyState !== 1 /* OPEN */) {
           clearInterval(pingInterval);
@@ -262,7 +280,6 @@ export default fp(async (fastify: FastifyInstance) => {
             }
             socket.ping();
           } catch (err) {
-            // A transient database error must not drop healthy sockets.
             fastify.log.warn({ err }, 'WebSocket heartbeat session check failed');
           }
         })();
@@ -306,5 +323,5 @@ export default fp(async (fastify: FastifyInstance) => {
     clients.clear();
   });
 
-  fastify.log.info('WebSocket notifications plugin registered with owner & premises room support');
+  fastify.log.info('WebSocket notifications plugin registered with multi-tenant organization & room support');
 });

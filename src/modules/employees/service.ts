@@ -207,7 +207,7 @@ export async function createEmployee(
         .limit(1)
     : [null];
 
-  return {
+  const result = {
     id: profile.employee.id,
     organizationId,
     organizationName: orgName,
@@ -220,7 +220,7 @@ export async function createEmployee(
     phone: profile.userRecord.phone ?? input.phone ?? null,
     address: profile.employee.address ?? input.address ?? null,
     avatarUrl: profile.userRecord.avatarUrl ?? uploadedAvatarUrl ?? null,
-    role: 'EMPLOYEE',
+    role: 'EMPLOYEE' as const,
     token: null,
     addedBy: actorUserId,
     metadata: null,
@@ -235,6 +235,25 @@ export async function createEmployee(
     approvedUnpaidBalancePaise: 0,
     paidBalancePaise: 0,
   };
+
+  const empUserId = profile.employee.userId;
+  if (typeof fastify.publishDomainEvent === 'function') {
+    await fastify.publishDomainEvent({
+      type: 'staff_update',
+      organizationId,
+      premisesId: profile.employee.premisesId,
+      userIds: empUserId ? [empUserId] : undefined,
+      targetRoles: ['OWNER', 'EMPLOYEE'],
+      payload: {
+        employeeId: profile.employee.id,
+        userId: empUserId,
+        action: 'CREATED',
+        actorId: actorUserId,
+      },
+    });
+  }
+
+  return result;
 }
 
 /**
@@ -706,6 +725,24 @@ export async function updateEmployee(
   if (!updated) {
     throw new AppError('Updated employee record not found', 500, 'INTERNAL_SERVER_ERROR');
   }
+
+  const updatedUserId = updated.userId;
+  if (typeof fastify.publishDomainEvent === 'function') {
+    await fastify.publishDomainEvent({
+      type: 'staff_update',
+      organizationId,
+      premisesId: updated.premisesId,
+      userIds: updatedUserId ? [updatedUserId] : undefined,
+      targetRoles: ['OWNER', 'EMPLOYEE'],
+      payload: {
+        employeeId: updated.id,
+        userId: updatedUserId,
+        action: 'UPDATED',
+        actorId: actorUserId,
+      },
+    });
+  }
+
   return updated;
 }
 

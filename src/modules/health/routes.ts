@@ -9,10 +9,16 @@ const healthResponseSchema = z.object({
   database: z.string(),
 });
 
+/**
+ * Health & Monitoring Routes Plugin.
+ * Purpose: Exposes HTTP probe endpoints for container orchestrators (Kubernetes/Cloud Run) to verify app liveness and PostgreSQL DB connectivity.
+ */
 export async function healthRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
-  // Liveness check
+  /**
+   * Purpose: Liveness probe check to confirm HTTP server is active and handling requests.
+   */
   server.get('/health/live', {
     schema: {
       description: 'Liveness check probe',

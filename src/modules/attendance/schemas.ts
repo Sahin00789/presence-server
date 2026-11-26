@@ -30,14 +30,6 @@ export const manualClockInSchema = z.object({
   premisesId: z.string().uuid().optional(),
 });
 
-export const clockOutSchema = z.object({
-  attendanceEventId: z.string().uuid().optional(),
-  latitude: z.number().min(-90).max(90).optional(),
-  longitude: z.number().min(-180).max(180).optional(),
-  accuracyMeters: z.number().nonnegative().optional(),
-  timestamp: z.string().datetime().optional(),
-});
-
 /**
  * Attendance event as returned to the client (camelCase).
  */

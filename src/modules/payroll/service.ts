@@ -4,7 +4,7 @@ import * as schema from '../../db/schema.js';
 import { AppError } from '../../shared/errors/app-error.js';
 import { findStaffProfile, resolveStaffProfile, listOrganizationStaff } from '../../shared/services/staff.service.js';
 import { dayOfWeek, daysInMonth, enumerateDates, toDateISO } from '../../shared/utils/datetime.js';
-import { buildPdfReport, PdfTable } from '../../shared/utils/pdf.js';
+import { buildPdfReport, buildModernPayslipPdf, PdfTable, PayslipPdfData } from '../../shared/utils/pdf.js';
 
 function getMonthDateRange(year: number, month: number) {
   const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
@@ -1423,10 +1423,18 @@ export async function getUnworkedPaymentRules(
       desc(schema.unworkedPaymentRules.createdAt)
     );
 
-  return rows.map((r) => ({
-    ...r,
-    paymentInr: Number(r.paymentInr ?? 0),
-  }));
+  return rows.map((r) => {
+    const pInr = Number(r.paymentInr ?? 0);
+    const hPay = r.dayType === 'HOLIDAY' ? Number(r.holidayPay || pInr) : 0;
+    const oPay = r.dayType === 'WEEKLY_OFF' ? Number(r.offDayPay || pInr) : 0;
+    const resolvedAmt = r.dayType === 'HOLIDAY' ? hPay : oPay;
+    return {
+      ...r,
+      paymentInr: resolvedAmt,
+      holidayPay: hPay,
+      offDayPay: oPay,
+    };
+  });
 }
 
 export async function createShiftPaymentRule(
@@ -1514,6 +1522,9 @@ export async function createUnworkedPaymentRule(
     dayType: (typeof schema.unworkedDayTypeEnum.enumValues)[number];
     paymentInr?: number;
     paymentCents?: number;
+    holidayPay?: number;
+    offDayPay?: number;
+    offdayPay?: number;
     multiplierBasisPoints?: number;
   }
 ) {
@@ -1536,7 +1547,21 @@ export async function createUnworkedPaymentRule(
     }
   }
 
-  const paymentAmount = input.paymentInr ?? (input.paymentCents !== undefined ? Math.round(input.paymentCents / 100) : 0);
+  const explicitAmt =
+    input.dayType === 'HOLIDAY'
+      ? input.holidayPay ?? input.paymentInr
+      : input.offDayPay ?? input.offdayPay ?? input.paymentInr;
+
+  const paymentAmount =
+    explicitAmt ??
+    (input.paymentCents !== undefined ? Math.round(input.paymentCents / 100) : 0);
+
+  const holidayPayVal =
+    input.dayType === 'HOLIDAY' ? paymentAmount : input.holidayPay ?? 0;
+  const offDayPayVal =
+    input.dayType === 'WEEKLY_OFF'
+      ? paymentAmount
+      : input.offDayPay ?? input.offdayPay ?? 0;
 
   // Check for an existing rule for same organization, employee/premises, and dayType
   const existingConditions = [
@@ -1566,6 +1591,8 @@ export async function createUnworkedPaymentRule(
       .update(schema.unworkedPaymentRules)
       .set({
         paymentInr: paymentAmount,
+        holidayPay: holidayPayVal,
+        offDayPay: offDayPayVal,
         premisesId: premisesId ?? existing.premisesId,
         createdAt: new Date(),
       })
@@ -1581,6 +1608,8 @@ export async function createUnworkedPaymentRule(
         employeeId: employeeId ?? null,
         dayType: input.dayType,
         paymentInr: paymentAmount,
+        holidayPay: holidayPayVal,
+        offDayPay: offDayPayVal,
         createdAt: new Date(),
       })
       .returning();
@@ -1621,6 +1650,150 @@ export async function createUnworkedPaymentRule(
   };
 }
 
+export async function enrichLedgerEntriesWithDetails(
+  fastify: FastifyInstance,
+  organizationId: string,
+  employeeId: string,
+  month: number,
+  year: number,
+  entries: Array<any>
+) {
+  if (!entries || entries.length === 0) return [];
+
+  const { startDate, nextMonthStartDate } = getMonthDateRange(year, month);
+
+  // 1. Fetch attendance records & shift info for this month
+  const attendanceRows = await fastify.db
+    .select({
+      id: schema.employeeAttendance.id,
+      workDate: schema.employeeAttendance.workDate,
+      status: schema.employeeAttendance.status,
+      shiftName: schema.shifts.shiftName,
+      dayName: schema.shifts.dayName,
+    })
+    .from(schema.employeeAttendance)
+    .leftJoin(
+      schema.employeeShiftAssignments,
+      eq(schema.employeeAttendance.shiftAssignmentId, schema.employeeShiftAssignments.id)
+    )
+    .leftJoin(
+      schema.shifts,
+      eq(schema.employeeShiftAssignments.shiftId, schema.shifts.id)
+    )
+    .where(
+      and(
+        eq(schema.employeeAttendance.organizationId, organizationId),
+        eq(schema.employeeAttendance.employeeId, employeeId),
+        gte(schema.employeeAttendance.workDate, startDate),
+        sql`${schema.employeeAttendance.workDate} < ${nextMonthStartDate}`
+      )
+    );
+
+  const attendanceByAttId = new Map<string, typeof attendanceRows[0]>();
+  const attendanceByDate = new Map<string, typeof attendanceRows[0]>();
+  for (const att of attendanceRows) {
+    if (att.id) attendanceByAttId.set(att.id, att);
+    if (att.workDate) attendanceByDate.set(String(att.workDate), att);
+  }
+
+  // Also query active shift assignments to get shift name & day name as fallback
+  const shiftAssignments = await fastify.db
+    .select({
+      id: schema.employeeShiftAssignments.id,
+      shiftName: schema.shifts.shiftName,
+      dayName: schema.shifts.dayName,
+    })
+    .from(schema.employeeShiftAssignments)
+    .innerJoin(schema.shifts, eq(schema.employeeShiftAssignments.shiftId, schema.shifts.id))
+    .where(
+      and(
+        eq(schema.employeeShiftAssignments.organizationId, organizationId),
+        eq(schema.employeeShiftAssignments.employeeId, employeeId)
+      )
+    );
+  const assignmentById = new Map<string, typeof shiftAssignments[0]>();
+  for (const sa of shiftAssignments) {
+    assignmentById.set(sa.id, sa);
+  }
+
+  // 2. Fetch employee specific weekly off config vs premises weekly off
+  const employeeWeeklyOffRows = await fastify.db
+    .select({ id: schema.weeklyOffs.id })
+    .from(schema.weeklyOffs)
+    .where(eq(schema.weeklyOffs.employeeId, employeeId))
+    .limit(1);
+  const isEmployeeSpecificWeeklyOff = employeeWeeklyOffRows.length > 0;
+
+  // 3. Fetch holiday calendar entries
+  const holidayRows = await fastify.db
+    .select({
+      id: schema.holidayCalendars.id,
+      date: schema.holidayCalendars.date,
+      name: schema.holidayCalendars.name,
+      isPaid: schema.holidayCalendars.isPaid,
+    })
+    .from(schema.holidayCalendars)
+    .where(
+      and(
+        eq(schema.holidayCalendars.organizationId, organizationId),
+        gte(schema.holidayCalendars.date, startDate),
+        sql`${schema.holidayCalendars.date} < ${nextMonthStartDate}`
+      )
+    );
+  const holidayByDate = new Map<string, typeof holidayRows[0]>();
+  for (const hol of holidayRows) {
+    if (hol.date) holidayByDate.set(String(hol.date), hol);
+  }
+
+  const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+  return entries.map((entry) => {
+    const isPaid = Number(entry.amount ?? 0) > 0;
+    const dateStr = String(entry.earningDate);
+    const dateObj = new Date(`${dateStr}T00:00:00Z`);
+    const dayNameStr = !isNaN(dateObj.getTime()) ? DAY_NAMES[dateObj.getUTCDay()] : '';
+
+    let description = '';
+
+    if (entry.type === 'SHIFT') {
+      const att = (entry.attendanceId ? attendanceByAttId.get(entry.attendanceId) : null) || attendanceByDate.get(dateStr);
+      const assignment = entry.shiftAssignmentId ? assignmentById.get(entry.shiftAssignmentId) : null;
+      const shiftName = att?.shiftName || assignment?.shiftName || 'Shift';
+      const statusRaw = att?.status || 'PRESENT';
+      const statusFormatted =
+        statusRaw === 'PRESENT' ? 'Present' :
+        statusRaw === 'HALF_DAY' ? 'Half Day' :
+        statusRaw === 'LEAVE' ? 'Leave' :
+        statusRaw === 'ABSENT' ? 'Absent' : 'Present';
+
+      const dayNameDisplay = att?.dayName || assignment?.dayName || dayNameStr || 'Day';
+      const notPaidText = isPaid ? '' : ' - Not Paid';
+      description = `${dayNameDisplay} - ${shiftName} (${statusFormatted}${notPaidText})`;
+    } else if (entry.type === 'OFF_DAY') {
+      const offTypeLabel = isEmployeeSpecificWeeklyOff ? 'his/her off day' : 'premises off';
+      const notPaidText = isPaid ? '' : ' (Not Paid)';
+      const capitalizedLabel = offTypeLabel.charAt(0).toUpperCase() + offTypeLabel.slice(1);
+      description = `${capitalizedLabel}${notPaidText}`;
+    } else if (entry.type === 'HOLIDAY') {
+      const hol = holidayByDate.get(dateStr);
+      const holName = hol?.name || 'Public Holiday';
+      const notPaidText = isPaid ? '' : ' (Not Paid)';
+      description = `${holName}${notPaidText}`;
+    } else if (entry.type === 'OVERTIME') {
+      const notPaidText = isPaid ? '' : ' (Not Paid)';
+      description = `Approved Overtime${notPaidText}`;
+    } else {
+      const notPaidText = isPaid ? '' : ' (Not Paid)';
+      description = `${entry.type}${notPaidText}`;
+    }
+
+    return {
+      ...entry,
+      description,
+    };
+  });
+}
+
 export async function getMyMonthlyEarningLedger(
   fastify: FastifyInstance,
   user: { userId: string; organizationId: string; role: string },
@@ -1657,6 +1830,15 @@ export async function getMyMonthlyEarningLedger(
     profile.id,
     month,
     year
+  );
+
+  const enrichedEntries = await enrichLedgerEntriesWithDetails(
+    fastify,
+    user.organizationId,
+    profile.id,
+    month,
+    year,
+    rawEntries
   );
 
   const payments = await fastify.db
@@ -1710,7 +1892,7 @@ export async function getMyMonthlyEarningLedger(
     },
     breakdown: r.breakdown ?? { earnings: [] },
     dailyTotals,
-    entries: rawEntries.map((e: any) => {
+    entries: enrichedEntries.map((e: any) => {
       const inr = Math.round(Number(e.amount) || 0);
       return {
         id: e.id,
@@ -1721,6 +1903,8 @@ export async function getMyMonthlyEarningLedger(
         amountPaise: inr,
         amountInr: inr,
         earningDate: e.earningDate,
+        sourceReference: e.sourceReference,
+        description: e.description,
         createdAt: e.createdAt,
       };
     }),
@@ -1771,6 +1955,15 @@ export async function getStaffMonthlyEarningLedger(
     profile.id,
     month,
     year
+  );
+
+  const enrichedEntries = await enrichLedgerEntriesWithDetails(
+    fastify,
+    organizationId,
+    profile.id,
+    month,
+    year,
+    rawEntries
   );
 
   const payments = await fastify.db
@@ -1959,10 +2152,11 @@ export async function downloadPayslipPdf(
       premisesId: schema.employees.premisesId,
       department: schema.employees.department,
       designation: schema.employees.designation,
+      hireDate: schema.employees.hireDate,
       email: schema.users.email,
     })
     .from(schema.employees)
-    .innerJoin(schema.users, eq(schema.employees.userId, schema.users.id))
+    .leftJoin(schema.users, eq(schema.employees.userId, schema.users.id))
     .where(
       and(
         eq(schema.employees.id, staffId),
@@ -1976,9 +2170,19 @@ export async function downloadPayslipPdf(
   }
 
   const [org] = await fastify.db
-    .select({ name: schema.organizations.name, currency: schema.organizations.currency })
+    .select({
+      name: schema.organizations.name,
+      currency: schema.organizations.currency,
+      logoUrl: schema.organizations.logoUrl,
+    })
     .from(schema.organizations)
     .where(eq(schema.organizations.id, user.organizationId))
+    .limit(1);
+
+  const [premisesRecord] = await fastify.db
+    .select({ name: schema.premises.name, address: schema.premises.address })
+    .from(schema.premises)
+    .where(eq(schema.premises.id, employee.premisesId))
     .limit(1);
 
   const orgName = org?.name || 'Presence Organization';
@@ -1994,38 +2198,229 @@ export async function downloadPayslipPdf(
   );
   if (!report) throw new AppError('Payroll report could not be generated', 500, 'PAYROLL_GENERATION_FAILED');
 
-  const r: any = report as any;
-  const att = r.attendanceSummary ?? {};
-  const monthNames = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December'
-  ];
-  const monthLabel = monthNames[query.month - 1] || `Month ${query.month}`;
+  const { startDate, nextMonthStartDate } = getMonthDateRange(query.year, query.month);
 
-  const pdfTable: PdfTable = {
-    title: `PAYSLIP - ${monthLabel.toUpperCase()} ${query.year}`,
-    subtitle: `${orgName} | Employee: ${employee.name} (${employee.employeeCode}) | Status: ${r.status}`,
-    columns: ['Category', 'Details', 'Amount / Count'],
-    rows: [
-      ['Employee', 'Name', employee.name],
-      ['Employee', 'Code', employee.employeeCode],
-      ['Employee', 'Email', employee.email],
-      ['Period', 'Month / Year', `${monthLabel} ${query.year}`],
-      ['Attendance', 'Present Days', att.presentDays ?? 0],
-      ['Attendance', 'Half Days', att.halfDays ?? 0],
-      ['Attendance', 'Absent Days', att.absentDays ?? 0],
-      ['Attendance', 'Leave Days', att.leaveDays ?? 0],
-      ['Attendance', 'Holiday Days', att.holidayDays ?? 0],
-      ['Attendance', 'Weekly Off Days', att.weeklyOffDays ?? 0],
-      ['Attendance', 'Overtime Minutes', att.totalOvertimeMinutes ?? 0],
-      ['Earnings', 'Gross Earned', `${currency} ${r.earnedAmount}`],
-      ['Summary', 'Net Due / Payable', `${currency} ${r.dueAmount}`],
-      ['Summary', 'Amount Paid', `${currency} ${r.paidAmount}`],
-      ['Status', 'Payroll Status', r.status],
-    ],
+  // 1. Assigned Shift Roster & Pay Rules
+  const assignedShifts = await fastify.db
+    .select({
+      shiftName: schema.shifts.shiftName,
+      dayName: schema.shifts.dayName,
+      startTime: schema.shifts.startTime,
+      endTime: schema.shifts.endTime,
+      halfDayThreshold: schema.shifts.halfDayThreshold,
+      presentPay: schema.employeeShiftAssignments.presentPay,
+      absentPay: schema.employeeShiftAssignments.absentPay,
+      halfDayPay: schema.employeeShiftAssignments.halfDayPay,
+      leavePay: schema.employeeShiftAssignments.leavePay,
+    })
+    .from(schema.employeeShiftAssignments)
+    .innerJoin(schema.shifts, eq(schema.employeeShiftAssignments.shiftId, schema.shifts.id))
+    .where(
+      and(
+        eq(schema.employeeShiftAssignments.employeeId, employee.id),
+        eq(schema.employeeShiftAssignments.organizationId, user.organizationId),
+        eq(schema.employeeShiftAssignments.isActive, true)
+      )
+    )
+    .orderBy(asc(schema.shifts.dayName));
+
+  // 2. Unworked Payment Rules
+  const unworkedRules = await fastify.db
+    .select({
+      dayType: schema.unworkedPaymentRules.dayType,
+      paymentInr: schema.unworkedPaymentRules.paymentInr,
+      holidayPay: schema.unworkedPaymentRules.holidayPay,
+      offDayPay: schema.unworkedPaymentRules.offDayPay,
+      multiplierBasisPoints: schema.unworkedPaymentRules.multiplierBasisPoints,
+    })
+    .from(schema.unworkedPaymentRules)
+    .where(
+      and(
+        eq(schema.unworkedPaymentRules.organizationId, user.organizationId),
+        or(
+          eq(schema.unworkedPaymentRules.employeeId, employee.id),
+          eq(schema.unworkedPaymentRules.premisesId, employee.premisesId)
+        )
+      )
+    );
+
+  // 3. Attendance Summary & Overtime
+  const attCounts = await fastify.db
+    .select({
+      status: schema.employeeShiftAttendance.status,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(schema.employeeShiftAttendance)
+    .where(
+      and(
+        eq(schema.employeeShiftAttendance.employeeId, employee.id),
+        eq(schema.employeeShiftAttendance.organizationId, user.organizationId),
+        gte(schema.employeeShiftAttendance.workDate, startDate),
+        sql`${schema.employeeShiftAttendance.workDate} < ${nextMonthStartDate}`
+      )
+    )
+    .groupBy(schema.employeeShiftAttendance.status);
+
+  const countMap: Record<string, number> = {};
+  attCounts.forEach((c) => {
+    countMap[c.status] = c.count;
+  });
+
+  const [overtimeRes] = await fastify.db
+    .select({
+      totalMins: sql<string>`COALESCE(SUM(${schema.overtime.workedMinutes}), 0)`,
+    })
+    .from(schema.overtime)
+    .where(
+      and(
+        eq(schema.overtime.employeeId, employee.id),
+        eq(schema.overtime.organizationId, user.organizationId),
+        gte(schema.overtime.workDate, startDate),
+        sql`${schema.overtime.workDate} < ${nextMonthStartDate}`,
+        eq(schema.overtime.status, 'COMPLETED')
+      )
+    );
+
+  const [holidayLedgerRes] = await fastify.db
+    .select({
+      count: sql<number>`count(*)::int`,
+    })
+    .from(schema.employeeEarningLedger)
+    .where(
+      and(
+        eq(schema.employeeEarningLedger.employeeId, employee.id),
+        eq(schema.employeeEarningLedger.organizationId, user.organizationId),
+        gte(schema.employeeEarningLedger.earningDate, startDate),
+        sql`${schema.employeeEarningLedger.earningDate} < ${nextMonthStartDate}`,
+        eq(schema.employeeEarningLedger.type, 'HOLIDAY')
+      )
+    );
+
+  const [offDayLedgerRes] = await fastify.db
+    .select({
+      count: sql<number>`count(*)::int`,
+    })
+    .from(schema.employeeEarningLedger)
+    .where(
+      and(
+        eq(schema.employeeEarningLedger.employeeId, employee.id),
+        eq(schema.employeeEarningLedger.organizationId, user.organizationId),
+        gte(schema.employeeEarningLedger.earningDate, startDate),
+        sql`${schema.employeeEarningLedger.earningDate} < ${nextMonthStartDate}`,
+        eq(schema.employeeEarningLedger.type, 'OFF_DAY')
+      )
+    );
+
+  const rAtt = (report as any).attendanceSummary || {};
+
+  // 4. Earning Ledger Entries
+  const ledgerEntries = await fastify.db
+    .select({
+      id: schema.employeeEarningLedger.id,
+      organizationId: schema.employeeEarningLedger.organizationId,
+      premisesId: schema.employeeEarningLedger.premisesId,
+      employeeId: schema.employeeEarningLedger.employeeId,
+      earningDate: schema.employeeEarningLedger.earningDate,
+      type: schema.employeeEarningLedger.type,
+      amount: schema.employeeEarningLedger.amount,
+      shiftAssignmentId: schema.employeeEarningLedger.shiftAssignmentId,
+      attendanceId: schema.employeeEarningLedger.attendanceId,
+      overtimeId: schema.employeeEarningLedger.overtimeId,
+      sourceReference: schema.employeeEarningLedger.sourceReference,
+    })
+    .from(schema.employeeEarningLedger)
+    .where(
+      and(
+        eq(schema.employeeEarningLedger.employeeId, employee.id),
+        eq(schema.employeeEarningLedger.organizationId, user.organizationId),
+        gte(schema.employeeEarningLedger.earningDate, startDate),
+        sql`${schema.employeeEarningLedger.earningDate} < ${nextMonthStartDate}`
+      )
+    )
+    .orderBy(asc(schema.employeeEarningLedger.earningDate));
+
+  const enrichedLedgerEntries = await enrichLedgerEntriesWithDetails(
+    fastify,
+    user.organizationId,
+    employee.id,
+    query.month,
+    query.year,
+    ledgerEntries
+  );
+
+  // 5. Disbursed Salary Payments (Payroll Transactions)
+  const paymentTransactions = await fastify.db
+    .select({
+      paymentDate: schema.payrollTransactions.paymentDate,
+      paymentMethod: schema.payrollTransactions.paymentMethod,
+      reference: schema.payrollTransactions.reference,
+      amount: schema.payrollTransactions.amount,
+    })
+    .from(schema.payrollTransactions)
+    .where(eq(schema.payrollTransactions.monthlyPayrollId, report.id))
+    .orderBy(asc(schema.payrollTransactions.paymentDate));
+
+  const pdfData: PayslipPdfData = {
+    orgName,
+    orgLogoUrl: org?.logoUrl || null,
+    currency,
+    premisesName: premisesRecord?.name || 'Main Premises',
+    premisesAddress: premisesRecord?.address || null,
+    employeeName: employee.name,
+    employeeCode: employee.employeeCode,
+    designation: employee.designation,
+    department: employee.department,
+    email: employee.email,
+    hireDate: employee.hireDate ? String(employee.hireDate) : null,
+    month: query.month,
+    year: query.year,
+    payrollStatus: report.status,
+    earnedAmount: report.earnedAmount,
+    paidAmount: report.paidAmount,
+    dueAmount: report.dueAmount,
+    shifts: assignedShifts.map((s) => ({
+      shiftName: s.shiftName,
+      dayName: s.dayName,
+      startTime: s.startTime,
+      endTime: s.endTime,
+      halfDayThreshold: s.halfDayThreshold,
+      presentPay: s.presentPay,
+      absentPay: s.absentPay,
+      halfDayPay: s.halfDayPay,
+      leavePay: s.leavePay,
+    })),
+    unworkedRules: unworkedRules.map((ur) => ({
+      dayType: ur.dayType as 'HOLIDAY' | 'WEEKLY_OFF',
+      paymentInr: String(ur.paymentInr ?? 0),
+      holidayPay: String(ur.holidayPay ?? 0),
+      offDayPay: String(ur.offDayPay ?? 0),
+      multiplierBasisPoints: ur.multiplierBasisPoints ?? undefined,
+    })),
+    attendanceSummary: {
+      presentDays: countMap['PRESENT'] ?? rAtt.presentDays ?? 0,
+      halfDays: countMap['HALF_DAY'] ?? rAtt.halfDays ?? 0,
+      absentDays: countMap['ABSENT'] ?? rAtt.absentDays ?? 0,
+      leaveDays: countMap['LEAVE'] ?? rAtt.leaveDays ?? 0,
+      holidayDays: holidayLedgerRes?.count ?? rAtt.holidayDays ?? 0,
+      weeklyOffDays: offDayLedgerRes?.count ?? rAtt.weeklyOffDays ?? 0,
+      totalOvertimeMinutes: Number(overtimeRes?.totalMins ?? rAtt.totalOvertimeMinutes ?? 0),
+    },
+    earningLedger: enrichedLedgerEntries.map((l) => ({
+      earningDate: String(l.earningDate),
+      type: l.type,
+      amount: l.amount,
+      sourceReference: l.description,
+      description: l.description,
+    })),
+    payments: paymentTransactions.map((p) => ({
+      paymentDate: String(p.paymentDate),
+      paymentMethod: p.paymentMethod,
+      reference: p.reference,
+      amount: p.amount,
+    })),
   };
 
-  const pdfBuffer = buildPdfReport(pdfTable);
+  const pdfBuffer = await buildModernPayslipPdf(pdfData);
   return {
     filename: `payslip-${employee.employeeCode}-${query.year}-${String(query.month).padStart(2, '0')}.pdf`,
     pdfBuffer,

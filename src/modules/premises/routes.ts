@@ -4,10 +4,18 @@ import { z } from 'zod';
 import { createPremisesSchema, premisesSchema, updatePremisesSchema } from './schemas.js';
 import { createPremises, getPremises, updatePremises } from './service.js';
 
+/**
+ * Premises Geofence Management Routes Plugin.
+ * Purpose: Provides REST API endpoints for listing, creating, and updating organization premises locations and geofence radii.
+ * Delegates business logic to premises service.
+ */
 export async function premisesRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
-  // List All Premises (General / OWNER)
+  /**
+   * Purpose: List active geofenced premises locations for the active organization.
+   * Service Delegation: Calls `getPremises()`.
+   */
   server.get(
     '/api/v1/premises',
     {

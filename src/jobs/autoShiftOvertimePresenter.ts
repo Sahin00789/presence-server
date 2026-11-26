@@ -3,9 +3,11 @@ import { and, eq, isNull, ne } from 'drizzle-orm';
 import * as schema from '../db/schema.js';
 import { accrueShiftEarnings } from '../modules/attendance/service.js';
 import { getAssignedDayNumbers, resolveTimezone } from '../modules/shifts/service.js';
+import { getWatermarkFromDate } from './watermark.js';
 import {
   addDays,
   dayOfWeek,
+  enumerateDates,
   resolveShiftWindow,
   toDateISOInTimeZone,
 } from '../shared/utils/datetime.js';
@@ -62,11 +64,9 @@ export async function processAutoPresentAndOvertimeCompletion(
     for (const assignment of activeAssignments) {
       const tz = await getOrgTz(assignment.organizationId);
       const todayISO = toDateISOInTimeZone(now, tz);
-      // Check last 7 days to account for multi-day server outages, restarts & overnight shifts
-      const datesToCheck: string[] = [];
-      for (let i = 7; i >= 0; i--) {
-        datesToCheck.push(addDays(todayISO, -i));
-      }
+      // Dynamic Watermark: Look up from latest processed earning date (or default 7 days lookback)
+      const watermarkFrom = await getWatermarkFromDate(fastify, assignment.organizationId, todayISO, 7);
+      const datesToCheck = enumerateDates(watermarkFrom, todayISO);
 
       for (const date of datesToCheck) {
         const dow = dayOfWeek(date);
@@ -181,12 +181,8 @@ export async function processAutoPresentAndOvertimeCompletion(
 
             shiftsProcessed += 1;
           } else if (existingAttendance) {
-            // If not manually marked as ABSENT, HALF_DAY, or LEAVE by owner,
-            // and clockOutAt is missing, auto-complete clock-out and default to PRESENT
-            if (
-              !['ABSENT', 'HALF_DAY', 'LEAVE'].includes(existingAttendance.status) &&
-              existingAttendance.clockOutAt === null
-            ) {
+            // Shift has ended: update status to PRESENT if no manual override, and accrue earnings immediately
+            if (!['ABSENT', 'HALF_DAY', 'LEAVE'].includes(existingAttendance.status)) {
               const clockInAt = existingAttendance.clockInAt ?? window.startAt;
               const clockOutAt = window.endAt;
 
@@ -213,14 +209,16 @@ export async function processAutoPresentAndOvertimeCompletion(
                     attendanceEventId: updated.id,
                     staffProfileId: assignment.employeeId,
                     status: 'PRESENT',
-                    action: 'AUTO_CLOCK_OUT',
+                    action: 'SHIFT_COMPLETED',
                     clockIn: clockInAt.toISOString(),
-                    clockOut: clockOutAt.toISOString(),
                   },
                 });
               }
 
               shiftsProcessed += 1;
+            } else {
+              // Accrue earnings for existing manual status (e.g. HALF_DAY) if not yet accrued
+              await accrueShiftEarnings(fastify, assignment.organizationId, existingAttendance);
             }
           } else {
             // No approved leave and no attendance row exists -> apply Default Present Policy immediately
@@ -255,9 +253,8 @@ export async function processAutoPresentAndOvertimeCompletion(
                   attendanceEventId: inserted.id,
                   staffProfileId: assignment.employeeId,
                   status: 'PRESENT',
-                  action: 'AUTO_CLOCK_OUT',
+                  action: 'SHIFT_COMPLETED',
                   clockIn: window.startAt.toISOString(),
-                  clockOut: window.endAt.toISOString(),
                 },
               });
             }

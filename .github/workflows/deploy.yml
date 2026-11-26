@@ -46,7 +46,10 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
-      - run: npm run db:migrate
+      - name: Generate & apply Drizzle database migrations
+        run: |
+          npm run db:generate
+          npm run db:migrate
       - run: npm run test
 
   deploy:
@@ -70,6 +73,7 @@ jobs:
             git reset --hard origin/main
             npm ci
             npm run build
+            npm run db:generate
             npm run db:migrate
             pm2 restart presence-api --update-env
             sleep 3
@@ -81,3 +85,31 @@ jobs:
             done
             echo "Health check did not pass within 60s"
             exit 1
+
+  release:
+    name: GitHub Release Build
+    needs: [ci, deploy]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read server version
+        id: server_version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.server_version.outputs.version }}
+          name: "Presence Server v${{ steps.server_version.outputs.version }}"
+          body: |
+            Automated production release of Presence Server backend.
+            • Verified database migrations & schema sync (Drizzle ORM).
+            • Automated CI/CD deployment to VPS.
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

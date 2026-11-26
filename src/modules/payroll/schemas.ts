@@ -35,6 +35,8 @@ export const staffEarningLedgerSchema = z.object({
   shiftAssignmentId: z.string().uuid().nullable(),
   attendanceEventId: z.string().uuid().nullable(),
   overtimeId: z.string().uuid().nullable(),
+  sourceReference: z.string().nullable().optional(),
+  description: z.string().nullable().optional(),
   createdAt: z.date().or(z.string()),
 });
 
@@ -108,6 +110,8 @@ export const unworkedPaymentRuleSchema = z.object({
   employeeId: z.string().uuid().nullable().optional(),
   dayType: z.enum(['HOLIDAY', 'WEEKLY_OFF']),
   paymentInr: z.number().int().nonnegative(),
+  holidayPay: z.number().int().nonnegative().optional().default(0),
+  offDayPay: z.number().int().nonnegative().optional().default(0),
   createdAt: z.date().or(z.string()).optional(),
 });
 
@@ -117,6 +121,9 @@ export const createUnworkedPaymentRuleSchema = z.object({
   dayType: z.enum(['HOLIDAY', 'WEEKLY_OFF']),
   paymentInr: z.number().int().nonnegative().optional(),
   paymentCents: z.number().int().nonnegative().optional(),
+  holidayPay: z.number().int().nonnegative().optional(),
+  offDayPay: z.number().int().nonnegative().optional(),
+  offdayPay: z.number().int().nonnegative().optional(),
 });
 
 export const unworkedRulesQuerySchema = z.object({

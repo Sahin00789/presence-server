@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
-const staffEarningLedger = (schema as any).employeeEarningLedger ?? (schema as any).staffEarningLedger;
+const staffEarningLedger = schema.employeeEarningLedger;
 import { AppError } from '../../shared/errors/app-error.js';
 import {
   evaluateGeofence,
@@ -580,14 +580,9 @@ async function clockIn(
       entry.id
     );
     if (existing) {
-      if (existing.clockInAt && !existing.clockOutAt) {
+      if (existing.clockInAt) {
         return existing;
       }
-      throw new AppError(
-        'Overtime attendance has already been completed.',
-        409,
-        'ALREADY_CLOCKED_OUT'
-      );
     }
 
     overtime = entry;
@@ -610,14 +605,9 @@ async function clockIn(
       shift.workDate
     );
     if (existing) {
-      if (existing.clockInAt && !existing.clockOutAt) {
+      if (existing.clockInAt) {
         return existing;
       }
-      throw new AppError(
-        'Attendance for this shift has already been completed.',
-        409,
-        'ALREADY_CLOCKED_OUT'
-      );
     }
 
     workDate = shift.workDate;
@@ -985,11 +975,7 @@ export async function accrueShiftEarnings(
   organizationId: string,
   event: AttendanceRow
 ) {
-  if (
-    !event.shiftAssignmentId ||
-    event.status === 'ABSENT' ||
-    event.status === 'LEAVE'
-  ) {
+  if (!event.shiftAssignmentId) {
     return;
   }
 
@@ -997,6 +983,8 @@ export async function accrueShiftEarnings(
     .select({
       presentPay: schema.employeeShiftAssignments.presentPay,
       halfDayPay: schema.employeeShiftAssignments.halfDayPay,
+      absentPay: schema.employeeShiftAssignments.absentPay,
+      leavePay: schema.employeeShiftAssignments.leavePay,
     })
     .from(schema.employeeShiftAssignments)
     .where(eq(schema.employeeShiftAssignments.id, event.shiftAssignmentId))
@@ -1005,26 +993,48 @@ export async function accrueShiftEarnings(
   if (!assignment) return;
 
   const pay =
-    event.status === 'HALF_DAY'
+    event.status === 'ABSENT'
+      ? Number(assignment.absentPay ?? 0)
+      : event.status === 'HALF_DAY'
       ? Number(assignment.halfDayPay ?? 0)
+      : event.status === 'LEAVE'
+      ? Number(assignment.leavePay ?? 0)
       : Number(assignment.presentPay ?? 0);
 
-  if (pay <= 0) return;
+  const amountStr = String(pay);
 
-  await fastify.db
-    .insert(staffEarningLedger)
-    .values({
-      organizationId,
-      premisesId: event.premisesId,
-      employeeId: event.employeeId,
-      earningDate: String(event.workDate),
-      type: 'SHIFT',
-      amount: String(pay),
-      shiftAssignmentId: event.shiftAssignmentId,
-      attendanceId: event.id,
-      sourceReference: `attendance:${event.id}:SHIFT`,
-    })
-    .onConflictDoNothing();
+  const [existingEarning] = await fastify.db
+    .select({ id: staffEarningLedger.id })
+    .from(staffEarningLedger)
+    .where(
+      and(
+        eq(staffEarningLedger.attendanceId, event.id),
+        eq(staffEarningLedger.type, 'SHIFT')
+      )
+    )
+    .limit(1);
+
+  if (existingEarning) {
+    await fastify.db
+      .update(staffEarningLedger)
+      .set({ amount: amountStr, updatedAt: new Date() })
+      .where(eq(staffEarningLedger.id, existingEarning.id));
+  } else {
+    await fastify.db
+      .insert(staffEarningLedger)
+      .values({
+        organizationId,
+        premisesId: event.premisesId,
+        employeeId: event.employeeId,
+        earningDate: String(event.workDate),
+        type: 'SHIFT',
+        amount: amountStr,
+        shiftAssignmentId: event.shiftAssignmentId,
+        attendanceId: event.id,
+        sourceReference: `attendance:${event.id}:SHIFT`,
+      })
+      .onConflictDoNothing();
+  }
 
   if (typeof fastify.publishDomainEvent === 'function') {
     await fastify.publishDomainEvent({
@@ -1087,7 +1097,7 @@ export async function completeOvertime(
     })
     .where(eq(schema.overtime.id, overtimeId));
 
-  const otPayment = Number((overtime as any).paymentInr ?? (overtime as any).paymentCents ?? 0);
+  const otPayment = Number(overtime.paymentInr ?? 0);
   if (otPayment > 0) {
     await fastify.db
       .insert(staffEarningLedger)
@@ -1277,7 +1287,7 @@ export async function listAttendanceRecords(
       desc(schema.employeeShiftAttendance.workDate),
       desc(schema.employeeShiftAttendance.clockInAt)
     )
-    .limit(query.limit ?? 500)
+    .limit(query.limit ?? 200)
     .offset(query.offset ?? 0);
 
   return rows.map((r) => {
@@ -1568,7 +1578,7 @@ export async function resolveException(
           .update(staffEarningLedger)
           .set({ amount, updatedAt: now })
           .where(eq(staffEarningLedger.id, existingEarning.id));
-      } else if (payCents !== 0) {
+      } else {
         await tx.insert(staffEarningLedger).values({
           organizationId,
           premisesId: event.premisesId,
@@ -1946,6 +1956,8 @@ export async function correctShiftAttendance(
       .where(eq(schema.employeeAttendance.id, event.id))
       .returning();
 
+    await accrueShiftEarnings(fastify, organizationId, updated);
+
     return toPublicAttendanceEvent(updated);
   } else {
     let empId = input.employeeId;
@@ -1990,6 +2002,8 @@ export async function correctShiftAttendance(
         correctedAt: now,
       })
       .returning();
+
+    await accrueShiftEarnings(fastify, organizationId, created);
 
     return toPublicAttendanceEvent(created);
   }

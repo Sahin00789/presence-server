@@ -145,7 +145,7 @@ export async function createShift(
     })
     .returning();
 
-  return {
+  const result = {
     id: created.id,
     organizationId: created.organizationId,
     organisationId: created.organizationId,
@@ -159,6 +159,22 @@ export async function createShift(
     createdAt: created.createdAt ? created.createdAt.toISOString() : undefined,
     updatedAt: created.updatedAt ? created.updatedAt.toISOString() : undefined,
   };
+
+  if (typeof fastify.publishDomainEvent === 'function') {
+    await fastify.publishDomainEvent({
+      type: 'shift_update',
+      organizationId,
+      premisesId: created.premisesId,
+      targetRoles: ['OWNER', 'EMPLOYEE'],
+      payload: {
+        shiftId: created.id,
+        action: 'CREATED',
+        actorId: actorUserId,
+      },
+    });
+  }
+
+  return result;
 }
 
 export async function updateShift(
@@ -202,7 +218,7 @@ export async function updateShift(
     )
     .returning();
 
-  return {
+  const result = {
     id: updated.id,
     organizationId: updated.organizationId,
     organisationId: updated.organizationId,
@@ -216,6 +232,22 @@ export async function updateShift(
     createdAt: updated.createdAt ? updated.createdAt.toISOString() : undefined,
     updatedAt: updated.updatedAt ? updated.updatedAt.toISOString() : undefined,
   };
+
+  if (typeof fastify.publishDomainEvent === 'function') {
+    await fastify.publishDomainEvent({
+      type: 'shift_update',
+      organizationId,
+      premisesId: updated.premisesId,
+      targetRoles: ['OWNER', 'EMPLOYEE'],
+      payload: {
+        shiftId: updated.id,
+        action: 'UPDATED',
+        actorId: actorUserId,
+      },
+    });
+  }
+
+  return result;
 }
 
 export async function deleteShift(
@@ -247,6 +279,19 @@ export async function deleteShift(
         eq(schema.shifts.organizationId, organizationId)
       )
     );
+
+  if (typeof fastify.publishDomainEvent === 'function') {
+    await fastify.publishDomainEvent({
+      type: 'shift_update',
+      organizationId,
+      targetRoles: ['OWNER', 'EMPLOYEE'],
+      payload: {
+        shiftId,
+        action: 'DELETED',
+        actorId: actorUserId,
+      },
+    });
+  }
 
   return { deleted: true };
 }
@@ -316,7 +361,12 @@ export async function createShiftAssignment(
   }
 
   const [emp] = await fastify.db
-    .select({ id: schema.employees.id, premisesId: schema.employees.premisesId, name: schema.employees.name })
+    .select({
+      id: schema.employees.id,
+      premisesId: schema.employees.premisesId,
+      name: schema.employees.name,
+      userId: schema.employees.userId,
+    })
     .from(schema.employees)
     .where(
       and(
@@ -385,7 +435,7 @@ export async function createShiftAssignment(
     input.weeklyOffs
   );
 
-  return {
+  const result = {
     id: created.id,
     organizationId: created.organizationId,
     organisationId: created.organizationId,
@@ -403,6 +453,26 @@ export async function createShiftAssignment(
     createdAt: created.createdAt ? created.createdAt.toISOString() : undefined,
     updatedAt: created.updatedAt ? created.updatedAt.toISOString() : undefined,
   };
+
+  const empUserId = emp.userId;
+  if (typeof fastify.publishDomainEvent === 'function') {
+    await fastify.publishDomainEvent({
+      type: 'shift_update',
+      organizationId,
+      premisesId: created.premisesId,
+      userIds: empUserId ? [empUserId] : [],
+      targetRoles: ['OWNER', 'EMPLOYEE'],
+      payload: {
+        assignmentId: created.id,
+        employeeId: created.employeeId,
+        userId: empUserId,
+        action: 'ASSIGNED',
+        actorId: actorUserId,
+      },
+    });
+  }
+
+  return result;
 }
 
 export async function updateShiftAssignment(

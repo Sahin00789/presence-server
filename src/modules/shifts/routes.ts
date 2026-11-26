@@ -22,10 +22,18 @@ import {
   updateShiftAssignment,
 } from './service.js';
 
+/**
+ * Shift Templates & Roster Scheduling Routes Plugin.
+ * Purpose: Provides REST API endpoints for shift template CRUD operations, employee roster shift assignments,
+ * and weekly off day configuration. Delegates business logic to shift service.
+ */
 export async function shiftRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
-  // 1. List Shift Templates
+  /**
+   * Purpose: List shift templates/definitions for an organization or premises location.
+   * Service Delegation: Calls `listShifts()`.
+   */
   server.get(
     '/api/v1/shifts',
     {

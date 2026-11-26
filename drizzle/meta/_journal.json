@@ -71,6 +71,13 @@
       "when": 1794207127432,
       "tag": "0009_divide_location_pings",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1795663744864,
+      "tag": "0010_unworked_rules_holiday_offday_pay",
+      "breakpoints": true
     }
   ]
 }

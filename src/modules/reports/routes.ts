@@ -16,9 +16,18 @@ import {
   renderReport,
 } from './service.js';
 
+/**
+ * Executive Reports & Analytics Routes Plugin.
+ * Purpose: Provides REST API endpoints for role-aware dashboard summary KPIs, monthly executive summaries,
+ * and attendance/payroll report downloads (JSON, CSV, PDF). Delegates business logic to report service.
+ */
 export async function reportRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
+  /**
+   * Purpose: Retrieve role-aware executive or employee dashboard metrics and status.
+   * Service Delegation: Calls `getDashboardSummary()`.
+   */
   server.get(
     '/api/v1/reports/dashboard',
     {
